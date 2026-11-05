@@ -1136,7 +1136,11 @@ public class MainActivity extends Activity {
         super.onTrimMemory(level);
         logMemory("trim-level-" + level);
         if (level >= TRIM_MEMORY_UI_HIDDEN && voiceServiceStarted) cancelVoiceSession();
-        if (level >= TRIM_MEMORY_RUNNING_LOW) deleteDirectoryContents(getCacheDir());
+        if (level == TRIM_MEMORY_UI_HIDDEN || level >= TRIM_MEMORY_BACKGROUND) {
+            // Only throw away reconstructible temporary files; song data and
+            // user state live in assets/preferences and are never cache-only.
+            deleteDirectoryContents(getCacheDir());
+        }
     }
 
     @Override protected void onStop() {

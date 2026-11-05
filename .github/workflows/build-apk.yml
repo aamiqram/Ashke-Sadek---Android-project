@@ -15,6 +15,9 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v5
 
+      - name: Validate catalogue, Word formatting, and memory invariants
+        run: python3 tests/validate_catalog.py
+
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:

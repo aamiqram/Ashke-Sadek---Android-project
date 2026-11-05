@@ -16,7 +16,9 @@ concurrency:
 
 jobs:
   publish:
-    if: github.event.workflow_run.conclusion == 'success'
+    # Never publish a per-run debug-signed APK as an in-place update.
+    # Enable only after permanent signing and the in-app updater are configured.
+    if: ${{ github.event.workflow_run.conclusion == 'success' && vars.ASHKE_STABLE_RELEASE_READY == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository for GitHub CLI context

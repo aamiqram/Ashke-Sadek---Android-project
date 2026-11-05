@@ -35,6 +35,16 @@ Gradle fetches SHA-256-pinned artifacts during the developer/CI build and packag
 - Corrected index-copy SHA-256: `c349196b014dbedf600ac236c3362d90e215912c1e63c406a03c7430496749be`.
 - Duplicate candidates are retained.
 
+## Memory-conscious runtime
+
+The reader keeps a single canonical copy of each song's lyric text. Paragraphs use offsets into that string; search does not retain normalized or phonetic duplicates for all 615 songs. Voice recognition runs in a separate `:voice` process, starts only for an active voice session, uses one CPU inference thread, releases the model, and exits after the session. Main and voice PSS/native-heap telemetry is written to logcat under `AshkeMemory`.
+
+A practical memory test should record idle home, reading a long song, search while typing, voice-model load, active capture, and post-voice idle on physical 2 GB and 3 GB devices. Use `adb shell dumpsys meminfo org.ashkeshadek.reader` and `adb logcat -s AshkeMemory`. CI can verify the architecture and compile, but it cannot certify memory usage on every OEM ROM.
+
+## Release publishing safety
+
+The automatic publisher is deliberately gated by the repository variable `ASHKE_STABLE_RELEASE_READY=true`. Debug builds are QA-only; publishing their regenerated debug certificate as a release would make future in-app updates fail Android's signature check. Enable the gate only after a permanent release keystore is configured and the updater manifest is attached to a signed release.
+
 ## Build
 
 - JDK 21, Android SDK Platform 36, Build Tools 36.0.0.
