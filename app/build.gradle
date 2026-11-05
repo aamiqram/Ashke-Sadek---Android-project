@@ -13,9 +13,8 @@ android {
         applicationId 'org.ashkeshadek.reader'
         minSdk 21
         targetSdk 36
-        versionCode (project.findProperty('appVersionCode') ?: '1') as int
-        versionName (project.findProperty('appVersionName') ?: '1.0.0').toString()
-        ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' }
+        versionCode 2
+        versionName '1.1.0-beta'
     }
     sourceSets { main { assets.srcDir(layout.buildDirectory.dir('generated/offline-voice-assets').get().asFile) } }
     buildTypes {
@@ -23,7 +22,13 @@ android {
         debug { minifyEnabled false }
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
-    packaging { resources { excludes += ['META-INF/DEPENDENCIES'] } }
+    packaging {
+        jniLibs {
+            // This is a phone-only distribution; omit emulator/desktop CPU libraries.
+            excludes += ['**/lib/x86/**', '**/lib/x86_64/**']
+        }
+        resources { excludes += ['META-INF/DEPENDENCIES'] }
+    }
 }
 dependencies {
     implementation files(sherpaAar)
