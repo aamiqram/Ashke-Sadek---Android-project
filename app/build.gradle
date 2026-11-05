@@ -2,14 +2,21 @@ plugins { id 'com.android.application' }
 
 def sherpaVersion='2.0.1'
 def sherpaAar=layout.buildDirectory.file("offline-dependencies/sherpa-onnx-${sherpaVersion}.aar")
-def modelArchive=layout.buildDirectory.file("offline-dependencies/sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09.tar.bz2")
 def generatedVoiceAssets=layout.buildDirectory.dir("generated/offline-voice-assets")
-def modelFolder='sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09'
+def modelFolder='sherpa-onnx-bn-vosk-int8-19d0fc5'
+def modelBaseUrl='https://huggingface.co/bbbipul/vosk-small-streaming-bn-int8/resolve/19d0fc5'
 
 android {
     namespace 'org.ashkeshadek.reader'
     compileSdk 36
-    defaultConfig { applicationId 'org.ashkeshadek.reader'; minSdk 21; targetSdk 36; versionCode 1; versionName '1.0.0' }
+    defaultConfig {
+        applicationId 'org.ashkeshadek.reader'
+        minSdk 21
+        targetSdk 36
+        versionCode (project.findProperty('appVersionCode') ?: '1') as int
+        versionName (project.findProperty('appVersionName') ?: '1.0.0').toString()
+        ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' }
+    }
     sourceSets { main { assets.srcDir(layout.buildDirectory.dir('generated/offline-voice-assets').get().asFile) } }
     buildTypes {
         release { minifyEnabled true; shrinkResources true; proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),'proguard-rules.pro' }
@@ -61,36 +68,32 @@ tasks.register('prepareOfflineVoiceAssets') {
         }
         File licenseSource=new File(layout.buildDirectory.get().asFile,'offline-dependencies/APACHE-2.0.txt')
         downloadFile('https://www.apache.org/licenses/LICENSE-2.0.txt',licenseSource)
-        File archive=modelArchive.get().asFile
-        downloadFile("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09.tar.bz2",archive)
-        if(sha256(archive)!='1bc89d81ee33ba7ddef8454736aeeb55e3cc1593274272485c6da342202b4b18'){
-            archive.delete();throw new GradleException('Bengali model SHA-256 mismatch.')
-        }
-        File extractionRoot=new File(layout.buildDirectory.get().asFile,'offline-voice-model-extracted')
-        File modelSource=new File(extractionRoot,modelFolder)
-        File destinationRoot=new File(generatedVoiceAssets.get().asFile,modelFolder)
-        if(!(new File(modelSource,'encoder.onnx').exists()&&new File(modelSource,'decoder.onnx').exists()
-                &&new File(modelSource,'joiner.onnx').exists()&&new File(modelSource,'tokens.txt').exists())){
-            project.delete(extractionRoot);extractionRoot.mkdirs()
-            // Gradle 9 removed the task-level exec helper; invoke the system tar directly.
-            def tarProcess = new ProcessBuilder(
-                    'tar', '-xjf', archive.absolutePath, '-C', extractionRoot.absolutePath)
-                    .redirectErrorStream(true)
-                    .start()
-            String tarOutput = tarProcess.inputStream.getText('UTF-8')
-            int tarExit = tarProcess.waitFor()
-            if (tarExit != 0) {
-                throw new GradleException(
-                        "Could not extract the Bengali model archive (tar exit ${tarExit}): ${tarOutput}")
+        File modelSource=new File(layout.buildDirectory.get().asFile,'offline-quantized-bengali-model')
+        modelSource.mkdirs()
+        def modelFiles = [
+                [name:'encoder.int8.onnx', sha:'8457d3a60b2baf0cf98079f3480ef7f192f62b0f7c6312dd181f9cf36869449a', min:20L*1024L*1024L],
+                [name:'decoder.onnx', sha:'fc03e8ca154593b95748198a56de115d4e6048d97c41692f93dfefb05f3693b4', min:1024L*1024L],
+                [name:'joiner.int8.onnx', sha:'2b2a22fbe5b79b0c900541f10cff1ac5518bd210e4c127cd647a31d8b286e25d', min:100L*1024L],
+                [name:'tokens.txt', sha:'', min:5000L]
+        ]
+        modelFiles.each { item ->
+            File source=new File(modelSource,item.name)
+            downloadFile("${modelBaseUrl}/${item.name}",source)
+            if(!source.isFile()||source.length()<item.min)
+                throw new GradleException("Bengali int8 model file missing/incomplete: ${item.name}")
+            if(item.sha && sha256(source)!=item.sha){
+                source.delete()
+                throw new GradleException("Bengali int8 model SHA-256 mismatch: ${item.name}")
             }
         }
-        ['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].each{fileName->
-            File source=new File(modelSource,fileName)
-            if(!source.isFile()||source.length()<(fileName=='encoder.onnx'?80L*1024L*1024L:1024L))
-                throw new GradleException("Bengali model missing/incomplete: ${fileName}")
-            File destination=new File(destinationRoot,fileName);destination.parentFile.mkdirs()
-            if(!destination.exists()||destination.length()!=source.length())
-                java.nio.file.Files.copy(source.toPath(),destination.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        File destinationRoot=new File(generatedVoiceAssets.get().asFile,modelFolder)
+        project.delete(destinationRoot)
+        modelFiles.each { item ->
+            File source=new File(modelSource,item.name)
+            File destination=new File(destinationRoot,item.name)
+            destination.parentFile.mkdirs()
+            java.nio.file.Files.copy(source.toPath(),destination.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
         }
         File licenseDestination=new File(generatedVoiceAssets.get().asFile,'third_party/APACHE-2.0.txt')
         licenseDestination.parentFile.mkdirs()

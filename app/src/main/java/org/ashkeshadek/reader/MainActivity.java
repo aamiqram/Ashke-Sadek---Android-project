@@ -14,16 +14,19 @@ import android.text.Layout;
 import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.style.LeadingMarginSpan;
+import android.text.style.StyleSpan;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.util.Log;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -81,6 +84,7 @@ public class MainActivity extends Activity {
     private AlertDialog voiceDialog;
     private TextView voiceStatus;
     private boolean voiceSessionCompleted = false;
+    private boolean voiceListeningStarted = false;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -90,6 +94,7 @@ public class MainActivity extends Activity {
         lastSongId = prefs.getString("last_song", "");
         recentIds = parseRecent(prefs.getString("recent", ""));
         loadCatalog();
+        loadEmphasis();
         enforceStorageBudget();
         volumeNames.add("প্রথম খণ্ড");
         volumeNames.add("দ্বিতীয় খণ্ড");
@@ -135,7 +140,17 @@ public class MainActivity extends Activity {
                         item.getString("title"), item.optString("lyrics", ""), item.optString("firstLine", ""),
                         item.optString("category", ""), blocks
                 );
-                song.searchableText = normalize(song.title + " " + song.firstLine + " " + song.lyrics);
+                String corpus = song.title + " " + song.firstLine + " " + song.lyrics;
+                String modernCorpus = modernizeOldBengali(corpus);
+                song.searchableText = normalize(corpus);
+                song.searchableModernText = normalize(modernCorpus);
+                song.searchablePhoneticText = phoneticNormalize(corpus + " " + modernCorpus);
+                Set<String> originalWords = searchWords(corpus);
+                Set<String> modernWords = searchWords(modernCorpus);
+                song.searchableWords.addAll(originalWords);
+                song.searchableModernWords.addAll(modernWords);
+                for (String word : originalWords) song.searchablePhoneticWords.add(phoneticNormalize(word));
+                for (String word : modernWords) song.searchablePhoneticWords.add(phoneticNormalize(word));
                 songs.add(song);
             }
         } catch (Exception e) {
@@ -149,6 +164,40 @@ public class MainActivity extends Activity {
             return new GZIPInputStream(getAssets().open("songs.json.gz"));
         } catch (Exception missingGz) {
             return getAssets().open("songs.json");
+        }
+    }
+
+    /** Applies the exact bold character ranges extracted from the original Word runs. */
+    private void loadEmphasis() {
+        try (InputStream input = new GZIPInputStream(getAssets().open("lyrics_emphasis.json.gz"));
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = input.read(buffer)) != -1) out.write(buffer, 0, count);
+            JSONArray rows = new JSONArray(out.toString("UTF-8"));
+            int position = 0;
+            for (Song song : songs) {
+                for (LyricBlock block : song.lyricBlocks) {
+                    if (position >= rows.length()) {
+                        Log.w("AshkeShadek", "Lyric emphasis sidecar ended before the catalogue.");
+                        return;
+                    }
+                    JSONArray spans = rows.getJSONArray(position++);
+                    for (int i = 0; i < spans.length(); i++) {
+                        JSONArray span = spans.getJSONArray(i);
+                        int start = span.getInt(0);
+                        int end = span.getInt(1);
+                        if (start >= 0 && end > start && end <= block.text.length()) {
+                            block.boldSpans.add(new int[]{start, end});
+                        }
+                    }
+                }
+            }
+            if (position != rows.length()) {
+                Log.w("AshkeShadek", "Lyric emphasis count does not match the catalogue.");
+            }
+        } catch (Exception error) {
+            Log.w("AshkeShadek", "Could not load original lyric emphasis ranges.", error);
         }
     }
 
@@ -345,27 +394,138 @@ public class MainActivity extends Activity {
 
     private void renderSearchResults(LinearLayout target, String query, int volumeFilter) {
         target.removeAllViews();
-        List<Song> matches=new ArrayList<>();
-        String q=normalize(query);
-        Song direct = q.isEmpty()?null:resolveDirectJump(query, volumeFilter > 0 ? volumeFilter : 0);
+        List<Song> matches = new ArrayList<>();
+        java.util.Map<String, Integer> scores = new java.util.HashMap<>();
+        String q = normalize(query);
+        Song direct = q.isEmpty() ? null : resolveDirectJump(query, volumeFilter > 0 ? volumeFilter : 0);
         if (direct != null && volumeFilter > 0 && direct.volume != volumeFilter) direct = null;
-        if(direct!=null) matches.add(direct);
-        else {
-            for(Song song:songs){
-                if(volumeFilter>0 && song.volume!=volumeFilter) continue;
-                if(q.isEmpty() || song.searchableText.contains(q)) matches.add(song);
+        if (direct != null) {
+            matches.add(direct);
+        } else {
+            for (Song song : songs) {
+                if (volumeFilter > 0 && song.volume != volumeFilter) continue;
+                int score = q.isEmpty() ? 1 : scoreSongMatch(song, query);
+                if (score > 0) {
+                    matches.add(song);
+                    scores.put(song.id, score);
+                }
+            }
+            if (!q.isEmpty()) {
+                Collections.sort(matches, (a, b) -> {
+                    int scoreCompare = Integer.compare(scores.get(b.id), scores.get(a.id));
+                    if (scoreCompare != 0) return scoreCompare;
+                    if (a.volume != b.volume) return Integer.compare(a.volume, b.volume);
+                    return Integer.compare(a.number, b.number);
+                });
             }
         }
-        if(query.trim().isEmpty() && volumeFilter==0 && !currentScreen.equals("index")) return;
-        if(matches.isEmpty()) {
-            TextView none=label("কোনো গান পাওয়া যায়নি। অন্য শব্দ দিয়ে খুঁজুন।",14,MUTED,false);
-            none.setPadding(dp(6),dp(18),dp(6),dp(18)); target.addView(none); return;
+        if (query.trim().isEmpty() && volumeFilter == 0 && !currentScreen.equals("index")) return;
+        if (matches.isEmpty()) {
+            TextView none = label("কোনো গান পাওয়া যায়নি। অন্য শব্দ দিয়ে খুঁজুন।", 14, MUTED, false);
+            none.setPadding(dp(6), dp(18), dp(6), dp(18));
+            target.addView(none);
+            return;
         }
-        TextView count=label(matches.size()+"টি গান পাওয়া গেছে",11,MUTED,false);
-        count.setPadding(dp(4),dp(5),dp(4),dp(6)); target.addView(count);
+        TextView count = label(matches.size() + "টি সম্ভাব্য গান পাওয়া গেছে", 11, MUTED, false);
+        count.setPadding(dp(4), dp(5), dp(4), dp(6));
+        target.addView(count);
         int firstBatch = Math.min(matches.size(), SONG_BATCH_SIZE);
-        addSongRows(target,matches.subList(0,firstBatch));
-        if(firstBatch < matches.size()) addMoreResults(target,matches,firstBatch);
+        addSongRows(target, matches.subList(0, firstBatch));
+        if (firstBatch < matches.size()) addMoreResults(target, matches, firstBatch);
+    }
+
+    private int scoreSongMatch(Song song, String query) {
+        String compact = normalize(query);
+        if (compact.isEmpty()) return 0;
+        if (song.searchableText.contains(compact)) return 1000 + compact.length();
+        if (song.searchableModernText.contains(compact)) return 850 + compact.length();
+        String phonetic = phoneticNormalize(query);
+        if (phonetic.length() >= 3 && song.searchablePhoneticText.contains(phonetic))
+            return 700 + phonetic.length();
+
+        List<String> terms = new ArrayList<>(searchWords(query));
+        if (terms.isEmpty()) return 0;
+        int exact = 0, modern = 0, phoneticHits = 0, fuzzy = 0;
+        for (String token : terms) {
+            if (token.length() < 2) continue;
+            String modernToken = normalize(modernizeOldBengali(token));
+            String soundToken = phoneticNormalize(token);
+            if (song.searchableWords.contains(token)) exact++;
+            else if (song.searchableModernWords.contains(token)
+                    || song.searchableWords.contains(modernToken)
+                    || song.searchableModernWords.contains(modernToken)) modern++;
+            else if (song.searchablePhoneticWords.contains(soundToken)) phoneticHits++;
+            else if (token.length() >= 4 && hasOneEditMatch(token, song.searchableWords)) fuzzy++;
+        }
+        int matched = exact + modern + phoneticHits + fuzzy;
+        int usableTerms = 0;
+        for (String token : terms) if (token.length() >= 2) usableTerms++;
+        if (matched == 0) return 0;
+        if (usableTerms >= 2 && matched < 2) return 0;
+        if (usableTerms >= 4 && matched * 4 < usableTerms) return 0;
+        return exact * 100 + modern * 78 + phoneticHits * 62 + fuzzy * 38
+                + (matched * 25 / Math.max(1, usableTerms));
+    }
+
+    /** Search-only spelling bridge; displayed lyrics always remain in the original text. */
+    private String modernizeOldBengali(String value) {
+        String[][] aliases = {
+                {"হইয়াছে", "হয়েছে"}, {"হইয়াছে", "হয়েছে"}, {"হইয়াছি", "হয়েছি"},
+                {"করিয়াছি", "করেছি"}, {"করিয়াছে", "করেছে"}, {"করিয়াছেন", "করেছেন"},
+                {"হইয়া", "হয়ে"}, {"হইয়ে", "হয়ে"}, {"হইলে", "হলে"},
+                {"হইতে", "হতে"}, {"হইবে", "হবে"}, {"হইল", "হল"},
+                {"করিয়া", "করে"}, {"করিতে", "করতে"}, {"করিতেছে", "করছে"},
+                {"করতেছে", "করছে"}, {"যাইতেছে", "যাচ্ছে"}, {"যাইয়া", "গিয়ে"},
+                {"দিয়া", "দিয়ে"}, {"লইয়া", "নিয়ে"}, {"পাইয়া", "পেয়ে"},
+                {"খাইয়া", "খেয়ে"}, {"বলিয়া", "বলে"}, {"দেখিয়া", "দেখে"},
+                {"তাহার", "তার"}, {"তাহাকে", "তাকে"}, {"যাহা", "যা"},
+                {"যাহার", "যার"}, {"যাহাতে", "যাতে"}, {"ইহা", "এটা"}
+        };
+        String result = Normalizer.normalize(value == null ? "" : value, Normalizer.Form.NFC);
+        for (String[] alias : aliases) {
+            result = result.replaceAll("(?<![\\p{L}\\p{M}])" + Pattern.quote(alias[0])
+                    + "(?![\\p{L}\\p{M}])", Matcher.quoteReplacement(alias[1]));
+        }
+        return result;
+    }
+
+    private String phoneticNormalize(String value) {
+        String result = normalize(value);
+        return result.replace("শ", "স").replace("ষ", "স").replace("ণ", "ন")
+                .replace("ী", "ি").replace("ঈ", "ই").replace("ূ", "ু")
+                .replace("ঊ", "উ").replace("ৎ", "ত");
+    }
+
+    private Set<String> searchWords(String value) {
+        Set<String> words = new HashSet<>();
+        if (value == null) return words;
+        Matcher matcher = Pattern.compile("[\\p{L}\\p{M}\\p{N}]+").matcher(value);
+        while (matcher.find()) {
+            String word = normalize(matcher.group());
+            if (word.length() >= 2) words.add(word);
+        }
+        return words;
+    }
+
+    private boolean hasOneEditMatch(String query, Set<String> candidates) {
+        for (String candidate : candidates) {
+            if (Math.abs(candidate.length() - query.length()) > 1 || candidate.length() < 3) continue;
+            if (oneEditAway(query, candidate)) return true;
+        }
+        return false;
+    }
+
+    private boolean oneEditAway(String first, String second) {
+        int i = 0, j = 0, edits = 0;
+        while (i < first.length() && j < second.length()) {
+            if (first.charAt(i) == second.charAt(j)) { i++; j++; continue; }
+            if (++edits > 1) return false;
+            if (first.length() > second.length()) i++;
+            else if (second.length() > first.length()) j++;
+            else { i++; j++; }
+        }
+        if (i < first.length() || j < second.length()) edits++;
+        return edits <= 1;
     }
 
     private void addSongRows(LinearLayout parent, List<Song> list) {
@@ -373,7 +533,11 @@ public class MainActivity extends Activity {
             LinearLayout item=cardRow();
             LinearLayout left=new LinearLayout(this);left.setOrientation(LinearLayout.VERTICAL);
             left.addView(label(song.title,15,TEXT,true));
-            addSpace(left,5);
+            TextView snippet = label(song.firstLine, 12, MUTED, false);
+            snippet.setMaxLines(2);
+            snippet.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            left.addView(snippet);
+            addSpace(left,4);
             left.addView(label(volumeShort(song.volume)+"  ·  গান "+bn(song.number),11,MUTED,false));
             item.addView(left,new LinearLayout.LayoutParams(0,-2,1f));
             TextView arrow=label("›",25,GREEN,true); item.addView(arrow);
@@ -420,16 +584,17 @@ public class MainActivity extends Activity {
 
         float density = getResources().getDisplayMetrics().density;
         float screenWidthDp = getResources().getDisplayMetrics().widthPixels / density;
-        int availableWidth = Math.max(dp(200), getResources().getDisplayMetrics().widthPixels - dp(28));
+        int availableWidth = Math.max(dp(168),
+                getResources().getDisplayMetrics().widthPixels - dp(24));
         int readerWidth = Math.min(availableWidth, dp(760));
-        int textMeasure = Math.max(dp(168), readerWidth - dp(32));
+        int textMeasure = Math.max(dp(132), readerWidth - dp(36));
         final float wordTextWidthPt = 671.8f;
 
         FrameLayout sheet = new FrameLayout(this);
         readerScroll.addView(sheet, new ScrollView.LayoutParams(-1, -2));
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(16), dp(10), dp(16), dp(112));
+        body.setPadding(dp(18), dp(10), dp(18), dp(112));
         FrameLayout.LayoutParams bodyParams = new FrameLayout.LayoutParams(
                 readerWidth, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         sheet.addView(body, bodyParams);
@@ -458,7 +623,7 @@ public class MainActivity extends Activity {
         favorite.setOnClickListener(v->{toggleSet(favorites,song.id,"favorites");favorite.setText(favorites.contains(song.id)?"♥\nপ্রিয়":"♡\nপ্রিয়");favorite.setTextColor(favorites.contains(song.id)?GREEN:TEXT);});
         bookmark.setOnClickListener(v->{toggleSet(bookmarks,song.id,"bookmarks");bookmark.setText(bookmarks.contains(song.id)?"▣\nবুকমার্ক":"▢\nবুকমার্ক");bookmark.setTextColor(bookmarks.contains(song.id)?GREEN:TEXT);});
 
-        int lyricSizeSp = screenWidthDp < 370f ? 17 : (screenWidthDp < 600f ? 18 : 19);
+        int lyricSizeSp = screenWidthDp < 360f ? 17 : (screenWidthDp < 600f ? 18 : 20);
         for (LyricBlock block : song.lyricBlocks) {
             TextView lyricLine = label(block.text, lyricSizeSp, TEXT, false);
             int gravity = block.alignment == 1 ? Gravity.CENTER_HORIZONTAL
@@ -471,17 +636,26 @@ public class MainActivity extends Activity {
             if (block.alignment == 3 && Build.VERSION.SDK_INT >= 26) {
                 lyricLine.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD);
             }
-            lyricLine.setLineSpacing(dp(5), 1.20f);
+            // Word paragraphs use single line spacing; avoid adding artificial vertical gaps.
+            lyricLine.setLineSpacing(0f, 1.0f);
             int leftIndent = responsiveWordMeasure(block.leftIndentPt, textMeasure, wordTextWidthPt);
             int firstIndent = Math.max(0, leftIndent + responsiveWordMeasure(
                     block.firstLineIndentPt, textMeasure, wordTextWidthPt));
-            if (leftIndent > 0 || firstIndent > 0) {
+            if (!block.boldSpans.isEmpty() || leftIndent > 0 || firstIndent > 0) {
                 SpannableString styled = new SpannableString(block.text);
-                styled.setSpan(new LeadingMarginSpan.Standard(firstIndent, leftIndent),
-                        0, styled.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                for (int[] span : block.boldSpans) {
+                    int start = Math.max(0, Math.min(span[0], styled.length()));
+                    int end = Math.max(start, Math.min(span[1], styled.length()));
+                    if (end > start) styled.setSpan(new StyleSpan(Typeface.BOLD), start, end,
+                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                }
+                if (leftIndent > 0 || firstIndent > 0) {
+                    styled.setSpan(new LeadingMarginSpan.Standard(firstIndent, leftIndent),
+                            0, styled.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                }
                 lyricLine.setText(styled);
             }
-            lyricLine.setPadding(dp(1), 0,
+            lyricLine.setPadding(0, 0,
                     responsiveWordMeasure(block.rightIndentPt, textMeasure, wordTextWidthPt), 0);
             lyricLine.setTextIsSelectable(true);
             LinearLayout.LayoutParams lyricParams = matchWrap();
@@ -534,6 +708,7 @@ public class MainActivity extends Activity {
         }
         cancelVoiceSession();
         voiceSessionCompleted = false;
+        voiceListeningStarted = false;
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -545,7 +720,8 @@ public class MainActivity extends Activity {
         voiceStatus.setGravity(Gravity.CENTER);
         voiceStatus.setPadding(0, dp(12), 0, dp(8));
         content.addView(voiceStatus, matchWrap());
-        TextView hint = label("গানের নাম, গানের কোনো লাইন অথবা গান নম্বর বলুন।", 13, MUTED, false);
+        TextView hint = label("প্রথমে প্রস্তুত হওয়া পর্যন্ত অপেক্ষা করুন। তারপর শুরু করে শুধু গানের একটি লাইন বলুন।",
+                13, MUTED, false);
         hint.setGravity(Gravity.CENTER);
         content.addView(hint, matchWrap());
 
@@ -553,7 +729,7 @@ public class MainActivity extends Activity {
                 .setTitle("বাংলা ভয়েস সার্চ")
                 .setView(content)
                 .setNegativeButton("বাতিল", (d, which) -> cancelVoiceSession())
-                .setPositiveButton("শেষ করুন", null)
+                .setPositiveButton("শুরু করুন", null)
                 .create();
         voiceDialog = dialog;
         dialog.setCanceledOnTouchOutside(false);
@@ -564,11 +740,19 @@ public class MainActivity extends Activity {
             }
         });
         dialog.show();
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            if (offlineVoice != null) {
+        Button action = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+        action.setEnabled(false);
+        action.setOnClickListener(v -> {
+            if (offlineVoice == null) return;
+            if (!voiceListeningStarted) {
+                voiceListeningStarted = true;
+                voiceStatus.setText("মাইক্রোফোন চালু হচ্ছে…");
+                action.setEnabled(false);
+                offlineVoice.beginListening();
+            } else {
                 voiceStatus.setText("কথা শনাক্ত করা হচ্ছে…");
-                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+                action.setText("খোঁজা হচ্ছে…");
+                action.setEnabled(false);
                 offlineVoice.finish();
             }
         });
@@ -576,8 +760,15 @@ public class MainActivity extends Activity {
         offlineVoice = new OfflineBengaliVoice(this, new OfflineBengaliVoice.Listener() {
             @Override public void onStatus(String message) {
                 if (voiceStatus != null) voiceStatus.setText(message);
-                if (message.startsWith("শুনছি") && voiceDialog != null)
-                    voiceDialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+                if (voiceDialog == null) return;
+                Button button = voiceDialog.getButton(AlertDialog.BUTTON_POSITIVE);
+                if (message.startsWith("প্রস্তুত")) {
+                    button.setText("শুরু করুন");
+                    button.setEnabled(true);
+                } else if (message.startsWith("শুনছি")) {
+                    button.setText("শেষ করুন ও খুঁজুন");
+                    button.setEnabled(true);
+                }
             }
             @Override public void onPartial(String text) {
                 if (voiceStatus != null) voiceStatus.setText("শুনছি…\n" + text);
@@ -607,6 +798,7 @@ public class MainActivity extends Activity {
         }
         voiceStatus = null;
         offlineVoice = null;
+        voiceListeningStarted = false;
     }
 
     private void cancelVoiceSession() {
@@ -621,6 +813,7 @@ public class MainActivity extends Activity {
             voiceDialog = null;
             old.dismiss();
         }
+        voiceListeningStarted = false;
     }
 
     private void handleVoiceSearchResult(EditText target, String phrase) {
@@ -734,6 +927,66 @@ public class MainActivity extends Activity {
         return s;
     }
 
+    private Set<String> searchWords(String value) {
+        Set<String> words = new HashSet<>();
+        if (value == null) return words;
+        Matcher matcher = Pattern.compile("[\\p{L}\\p{M}\\p{N}]+").matcher(value);
+        while (matcher.find()) {
+            String word = normalize(matcher.group());
+            if (word.length() >= 2) words.add(word);
+        }
+        return words;
+    }
+
+    private String modernizeOldBengali(String value) {
+        String[][] aliases = {
+                {"হইয়াছে", "হয়েছে"}, {"হইয়াছে", "হয়েছে"}, {"হইয়াছি", "হয়েছি"},
+                {"করিয়াছি", "করেছি"}, {"করিয়াছে", "করেছে"}, {"করিয়াছেন", "করেছেন"},
+                {"হইয়া", "হয়ে"}, {"হইয়ে", "হয়ে"}, {"হইলে", "হলে"},
+                {"হইতে", "হতে"}, {"হইবে", "হবে"}, {"হইল", "হল"},
+                {"করিয়া", "করে"}, {"করিতে", "করতে"}, {"করিতেছে", "করছে"},
+                {"করতেছে", "করছে"}, {"যাইতেছে", "যাচ্ছে"}, {"যাইয়া", "গিয়ে"},
+                {"দিয়া", "দিয়ে"}, {"লইয়া", "নিয়ে"}, {"পাইয়া", "পেয়ে"},
+                {"খাইয়া", "খেয়ে"}, {"বলিয়া", "বলে"}, {"দেখিয়া", "দেখে"},
+                {"তাহার", "তার"}, {"তাহাকে", "তাকে"}, {"যাহা", "যা"},
+                {"যাহার", "যার"}, {"যাহাতে", "যাতে"}, {"ইহা", "এটা"}
+        };
+        String result = Normalizer.normalize(value == null ? "" : value, Normalizer.Form.NFC);
+        for (String[] alias : aliases) {
+            result = result.replaceAll("(?<![\\p{L}\\p{M}])" + Pattern.quote(alias[0])
+                    + "(?![\\p{L}\\p{M}])", Matcher.quoteReplacement(alias[1]));
+        }
+        return result;
+    }
+
+    private String phoneticNormalize(String value) {
+        String result = normalize(value);
+        return result.replace("শ", "স").replace("ষ", "স").replace("ণ", "ন")
+                .replace("ী", "ি").replace("ঈ", "ই").replace("ূ", "ু")
+                .replace("ঊ", "উ").replace("ৎ", "ত");
+    }
+
+    private boolean hasOneEditMatch(String query, Set<String> candidates) {
+        for (String candidate : candidates) {
+            if (Math.abs(candidate.length() - query.length()) > 1 || candidate.length() < 3) continue;
+            if (oneEditAway(query, candidate)) return true;
+        }
+        return false;
+    }
+
+    private boolean oneEditAway(String first, String second) {
+        int i = 0, j = 0, edits = 0;
+        while (i < first.length() && j < second.length()) {
+            if (first.charAt(i) == second.charAt(j)) { i++; j++; continue; }
+            if (++edits > 1) return false;
+            if (first.length() > second.length()) i++;
+            else if (second.length() > first.length()) j++;
+            else { i++; j++; }
+        }
+        if (i < first.length() || j < second.length()) edits++;
+        return edits <= 1;
+    }
+
     private Song byId(String id){for(Song s:songs)if(s.id.equals(id))return s;return null;}
     private Song byPosition(int volume,int number){for(Song s:songs)if(s.volume==volume&&s.number==number)return s;return null;}
     private int countInVolume(int volume){int c=0;for(Song s:songs)if(s.volume==volume)c++;return c;}
@@ -843,6 +1096,11 @@ public class MainActivity extends Activity {
         final String id; final int volume; final int number; final String title; final String lyrics; final String firstLine;
         final String category; final List<LyricBlock> lyricBlocks;
         String searchableText = "";
+        String searchableModernText = "";
+        String searchablePhoneticText = "";
+        final Set<String> searchableWords = new HashSet<>();
+        final Set<String> searchableModernWords = new HashSet<>();
+        final Set<String> searchablePhoneticWords = new HashSet<>();
         Song(String id,int volume,int number,String title,String lyrics,String firstLine,String category,List<LyricBlock> lyricBlocks){
             this.id=id; this.volume=volume; this.number=number; this.title=title; this.lyrics=lyrics; this.firstLine=firstLine;
             this.category=category; this.lyricBlocks=lyricBlocks;
@@ -853,6 +1111,7 @@ public class MainActivity extends Activity {
         final String text; final int alignment;
         final float leftIndentPt; final float firstLineIndentPt; final float rightIndentPt;
         final float spaceBeforePt; final float spaceAfterPt;
+        final List<int[]> boldSpans = new ArrayList<>();
         LyricBlock(String text,int alignment,float leftIndentPt,float firstLineIndentPt,float rightIndentPt,float spaceBeforePt,float spaceAfterPt){
             this.text=text; this.alignment=alignment; this.leftIndentPt=leftIndentPt; this.firstLineIndentPt=firstLineIndentPt;
             this.rightIndentPt=rightIndentPt; this.spaceBeforePt=spaceBeforePt; this.spaceAfterPt=spaceAfterPt;

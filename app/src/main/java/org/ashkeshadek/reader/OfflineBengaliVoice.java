@@ -20,16 +20,20 @@ final class OfflineBengaliVoice {
     interface Listener { void onStatus(String message); void onPartial(String text); void onResult(String text); void onError(String message); }
     private static final int MODEL_RATE=16000;
     private static final int[] CAPTURE_RATES={16000,48000,44100};
-    private static final String MODEL_DIR="sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09";
+    private static final String MODEL_DIR="sherpa-onnx-bn-vosk-int8-19d0fc5";
+    private static final Object RECOGNIZER_LOCK = new Object();
+    private static final Object SESSION_LOCK = new Object();
+    private static volatile OnlineRecognizer cachedRecognizer;
     private final Context context;
     private final Listener listener;
     private final Handler main=new Handler(Looper.getMainLooper());
     private volatile AudioRecord recorder;
-    private volatile boolean stopRequested,cancelled;
+    private volatile boolean stopRequested,cancelled,beginRequested;
     private Thread worker;
 
     OfflineBengaliVoice(Context context,Listener listener){this.context=context.getApplicationContext();this.listener=listener;}
     void start(){if(worker!=null)return;worker=new Thread(this::runRecognition,"ashke-bengali-asr");worker.start();}
+    void beginListening(){synchronized(this){beginRequested=true;notifyAll();}}
     void finish(){stopRequested=true;stopRecorder();}
     void cancel(){cancelled=true;stopRequested=true;stopRecorder();}
     private void stopRecorder(){
@@ -72,6 +76,12 @@ final class OfflineBengaliVoice {
     }
 
     private void runRecognition(){
+        synchronized (SESSION_LOCK) {
+            runRecognitionSession();
+        }
+    }
+
+    private void runRecognitionSession(){
         OnlineRecognizer recognizer=null;OnlineStream stream=null;AudioRecord audio=null;
         StringBuilder completedText=new StringBuilder();String latestText="";
         try{
@@ -79,9 +89,9 @@ final class OfflineBengaliVoice {
             status("বাংলা অফলাইন মডেল চালু হচ্ছে…");
             FeatureConfig feature=new FeatureConfig();feature.setSampleRate(MODEL_RATE);feature.setFeatureDim(80);
             OnlineTransducerModelConfig transducer=new OnlineTransducerModelConfig();
-            transducer.setEncoder(MODEL_DIR+"/encoder.onnx");
+            transducer.setEncoder(MODEL_DIR+"/encoder.int8.onnx");
             transducer.setDecoder(MODEL_DIR+"/decoder.onnx");
-            transducer.setJoiner(MODEL_DIR+"/joiner.onnx");
+            transducer.setJoiner(MODEL_DIR+"/joiner.int8.onnx");
             OnlineModelConfig model=new OnlineModelConfig();
             model.setTransducer(transducer);model.setTokens(MODEL_DIR+"/tokens.txt");
             model.setNumThreads(Math.max(1,Math.min(2,Runtime.getRuntime().availableProcessors())));
@@ -94,7 +104,19 @@ final class OfflineBengaliVoice {
             // the capture loop below resets the stream and continues listening.
             config.setEnableEndpoint(true);
 
-            recognizer=new OnlineRecognizer(context.getAssets(),config);stream=recognizer.createStream("");
+            synchronized (RECOGNIZER_LOCK) {
+                if (cachedRecognizer == null) {
+                    cachedRecognizer = new OnlineRecognizer(context.getAssets(), config);
+                }
+                recognizer = cachedRecognizer;
+            }
+            stream=recognizer.createStream("");
+
+            status("প্রস্তুত। শুরু করুন চাপুন, তারপর শুধু গানের লাইনটি বলুন।");
+            synchronized (this) {
+                while (!beginRequested && !stopRequested && !cancelled) wait();
+            }
+            if (cancelled || stopRequested) return;
 
             AudioInput input=createAudioInput();
             audio=input.record;
@@ -105,7 +127,7 @@ final class OfflineBengaliVoice {
             audio.startRecording();
             if(audio.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING)
                 throw new IllegalStateException("মাইক্রোফোন রেকর্ডিং শুরু করতে পারেনি।");
-            status("শুনছি… বাংলায় গানের নাম বা লাইন বলুন।");
+            status("শুনছি — একটি ছোট গানের লাইন বলুন।");
             short[] buffer=new short[Math.max(1600,input.sampleRate/10)];
 
             while(!stopRequested&&!cancelled){
@@ -169,7 +191,6 @@ final class OfflineBengaliVoice {
                 try{audio.release();}catch(Exception ignored){}
             }
             if(stream!=null)try{stream.release();}catch(Exception ignored){}
-            if(recognizer!=null)try{recognizer.release();}catch(Exception ignored){}
         }
     }
 
