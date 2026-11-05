@@ -756,59 +756,89 @@ public class MainActivity extends Activity {
         voiceDialog = dialog;
         dialog.setCanceledOnTouchOutside(false);
         dialog.setOnDismissListener(d -> {
-            if (!voiceSessionCompleted && offlineVoice != null) {
-                offlineVoice.cancel();
-                offlineVoice = null;
-            }
+            if (!voiceSessionCompleted && voiceServiceStarted) cancelVoiceSession();
         });
         dialog.show();
         Button action = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
         action.setEnabled(false);
         action.setOnClickListener(v -> {
-            if (offlineVoice == null) return;
+            if (!voiceServiceStarted) return;
             if (!voiceListeningStarted) {
                 voiceListeningStarted = true;
                 voiceStatus.setText("মাইক্রোফোন চালু হচ্ছে…");
                 action.setEnabled(false);
-                offlineVoice.beginListening();
+                sendVoiceServiceCommand(VoiceRecognitionService.ACTION_BEGIN);
             } else {
                 voiceStatus.setText("কথা শনাক্ত করা হচ্ছে…");
                 action.setText("খোঁজা হচ্ছে…");
                 action.setEnabled(false);
-                offlineVoice.finish();
+                sendVoiceServiceCommand(VoiceRecognitionService.ACTION_FINISH);
             }
         });
 
-        offlineVoice = new OfflineBengaliVoice(this, new OfflineBengaliVoice.Listener() {
-            @Override public void onStatus(String message) {
-                if (voiceStatus != null) voiceStatus.setText(message);
-                if (voiceDialog == null) return;
-                Button button = voiceDialog.getButton(AlertDialog.BUTTON_POSITIVE);
-                if (message.startsWith("প্রস্তুত")) {
-                    button.setText("শুরু করুন");
-                    button.setEnabled(true);
-                } else if (message.startsWith("শুনছি")) {
-                    button.setText("শেষ করুন ও খুঁজুন");
-                    button.setEnabled(true);
+        voiceReceiver = new ResultReceiver(new Handler(Looper.getMainLooper())) {
+            @Override protected void onReceiveResult(int resultCode, Bundle data) {
+                String text = data == null ? "" : data.getString("text", "");
+                if (resultCode == VoiceRecognitionService.RESULT_STATUS) {
+                    if (voiceStatus != null) voiceStatus.setText(text);
+                    if (voiceDialog != null) {
+                        Button button = voiceDialog.getButton(AlertDialog.BUTTON_POSITIVE);
+                        if (text.startsWith("প্রস্তুত")) {
+                            button.setText("শুরু করুন");
+                            button.setEnabled(true);
+                        } else if (text.startsWith("শুনছি")) {
+                            button.setText("শেষ করুন ও খুঁজুন");
+                            button.setEnabled(true);
+                        }
+                    }
+                } else if (resultCode == VoiceRecognitionService.RESULT_PARTIAL) {
+                    if (voiceStatus != null) voiceStatus.setText("শুনছি…\n" + text);
+                } else if (resultCode == VoiceRecognitionService.RESULT_TEXT) {
+                    finishVoiceDialog();
+                    handleVoiceSearchResult(target, text);
+                } else if (resultCode == VoiceRecognitionService.RESULT_ERROR) {
+                    finishVoiceDialog();
+                    Toast.makeText(MainActivity.this, text, Toast.LENGTH_LONG).show();
+                    if (target == null) {
+                        renderIndex();
+                        if (activeSearch != null) activeSearch.requestFocus();
+                    } else target.requestFocus();
+                } else if (resultCode == VoiceRecognitionService.RESULT_FINISHED
+                        && voiceDialog != null && !voiceSessionCompleted) {
+                    finishVoiceDialog();
+                    Toast.makeText(MainActivity.this,
+                            "ভয়েস প্রসেসটি বন্ধ হয়ে গেছে। আবার চেষ্টা করুন।",
+                            Toast.LENGTH_LONG).show();
                 }
             }
-            @Override public void onPartial(String text) {
-                if (voiceStatus != null) voiceStatus.setText("শুনছি…\n" + text);
+        };
+
+        try {
+            Intent startIntent = new Intent(this, VoiceRecognitionService.class)
+                    .setAction(VoiceRecognitionService.ACTION_START)
+                    .putExtra(VoiceRecognitionService.EXTRA_RECEIVER, voiceReceiver);
+            startService(startIntent);
+            voiceServiceStarted = true;
+        } catch (Exception error) {
+            finishVoiceDialog();
+            Toast.makeText(this, "অফলাইন ভয়েস সার্ভিস চালু করা যায়নি।",
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void sendVoiceServiceCommand(String action) {
+        if (!voiceServiceStarted) return;
+        try {
+            Intent command = new Intent(this, VoiceRecognitionService.class).setAction(action);
+            if (voiceReceiver != null) {
+                command.putExtra(VoiceRecognitionService.EXTRA_RECEIVER, voiceReceiver);
             }
-            @Override public void onResult(String phrase) {
-                finishVoiceDialog();
-                handleVoiceSearchResult(target, phrase);
-            }
-            @Override public void onError(String message) {
-                finishVoiceDialog();
-                Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
-                if (target == null) {
-                    renderIndex();
-                    if (activeSearch != null) activeSearch.requestFocus();
-                } else target.requestFocus();
-            }
-        });
-        offlineVoice.start();
+            startService(command);
+        } catch (Exception error) {
+            finishVoiceDialog();
+            Toast.makeText(this, "ভয়েস সার্ভিস পাওয়া যাচ্ছে না। আবার চেষ্টা করুন।",
+                    Toast.LENGTH_LONG).show();
+        }
     }
 
     private void finishVoiceDialog() {
@@ -819,16 +849,18 @@ public class MainActivity extends Activity {
             old.dismiss();
         }
         voiceStatus = null;
-        offlineVoice = null;
+        voiceReceiver = null;
+        voiceServiceStarted = false;
         voiceListeningStarted = false;
     }
 
     private void cancelVoiceSession() {
         voiceSessionCompleted = true;
-        if (offlineVoice != null) {
-            offlineVoice.cancel();
-            offlineVoice = null;
+        if (voiceServiceStarted) {
+            sendVoiceServiceCommand(VoiceRecognitionService.ACTION_CANCEL);
         }
+        voiceReceiver = null;
+        voiceServiceStarted = false;
         voiceStatus = null;
         if (voiceDialog != null) {
             AlertDialog old = voiceDialog;
@@ -1003,7 +1035,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onPause() {
         saveReaderPosition();
-        if (offlineVoice != null) cancelVoiceSession();
+        if (voiceServiceStarted) cancelVoiceSession();
         super.onPause();
     }
 
