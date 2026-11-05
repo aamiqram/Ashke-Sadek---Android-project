@@ -43,7 +43,24 @@ A practical memory test should record idle home, reading a long song, search whi
 
 ## Release publishing safety
 
-The automatic publisher is deliberately gated by the repository variable `ASHKE_STABLE_RELEASE_READY=true`. Debug builds are QA-only; publishing their regenerated debug certificate as a release would make future in-app updates fail Android's signature check. Enable the gate only after a permanent release keystore is configured and the updater manifest is attached to a signed release.
+The app checks the public GitHub releases feed at most once per day and has a manual update entry on the home screen. It downloads only APKs described by the repository's `update.json` manifest, verifies SHA-256, package ID, version code and signing certificate, then uses Android's Package Installer. Android displays the final install confirmation; the app cannot silently install an APK.
+
+Every published release must use the same permanent signing key and a higher version code. CI release publishing is gated by `ASHKE_STABLE_RELEASE_READY=true` and requires four repository Actions secrets. The earlier beta used regenerated debug signing, so the first permanent-key update needs a one-time manual migration (uninstalling the old beta deletes app-local favourites and bookmarks). After migration, same-key releases update in place and preserve local data.
+
+Generate and back up the permanent signing key locally (never commit it):
+
+```powershell
+keytool -genkeypair -v -keystore ashke-shadek-release.jks -alias ashke-shadek -keyalg RSA -keysize 4096 -validity 10000
+[Convert]::ToBase64String([IO.File]::ReadAllBytes(".\\ashke-shadek-release.jks")) | Set-Clipboard
+```
+
+In GitHub repository **Settings → Secrets and variables → Actions**, add:
+- `ASHKE_KEYSTORE_BASE64` — copied Base64 keystore content
+- `ASHKE_KEYSTORE_PASSWORD` — keystore password
+- `ASHKE_KEY_ALIAS` — `ashke-shadek`
+- `ASHKE_KEY_PASSWORD` — key password
+
+After checking that a signed test APK uses the same certificate for all future builds, set repository Actions variable `ASHKE_STABLE_RELEASE_READY` to `true`. Keep the keystore backup offline and never share its passwords.
 
 ## Build
 

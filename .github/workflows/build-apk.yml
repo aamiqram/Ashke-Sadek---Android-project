@@ -24,6 +24,32 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Configure permanent release signing
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ASHKE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ASHKE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ASHKE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ASHKE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${KEYSTORE_BASE64:-}" || -z "${KEYSTORE_PASSWORD:-}" || -z "${KEY_ALIAS:-}" || -z "${KEY_PASSWORD:-}" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Permanent release signing is not configured. The release APK will be unsigned QA output."
+          else
+            KEYSTORE_PATH="$RUNNER_TEMP/ashke-shadek-release.jks"
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+            test -s "$KEYSTORE_PATH"
+            {
+              echo "ASHKE_KEYSTORE_PATH=$KEYSTORE_PATH"
+              echo "ASHKE_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+              echo "ASHKE_KEY_ALIAS=$KEY_ALIAS"
+              echo "ASHKE_KEY_PASSWORD=$KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Android SDK packages
         run: |
           set -e
@@ -39,10 +65,20 @@ jobs:
         with:
           gradle-version: '9.6.0'
 
-      - name: Build installable debug APK and optimized release APK
-        run: gradle --no-daemon :app:assembleDebug :app:assembleRelease
+      - name: Build Android APK variants
+        env:
+          APP_RUN_NUMBER: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_VERSION_CODE=$((1000 + APP_RUN_NUMBER))
+          APP_VERSION_NAME="1.1.${APP_RUN_NUMBER}-beta"
+          echo "APP_VERSION_CODE=$APP_VERSION_CODE" >> "$GITHUB_ENV"
+          echo "APP_VERSION_NAME=$APP_VERSION_NAME" >> "$GITHUB_ENV"
+          gradle --no-daemon :app:assembleDebug :app:assembleRelease \
+            -PappVersionCode="$APP_VERSION_CODE" -PappVersionName="$APP_VERSION_NAME"
 
-      - name: Upload installable debug APK
+      - name: Upload installable debug APK for QA only
         uses: actions/upload-artifact@v4
         with:
           name: ashke-shadek-installable-debug-apk
@@ -50,7 +86,17 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload optimized unsigned release APK
+      - name: Upload permanently signed release APK
+        if: steps.signing.outputs.configured == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashke-shadek-signed-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload unsigned release APK for QA only
+        if: steps.signing.outputs.configured != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ashke-shadek-release-unsigned-apk

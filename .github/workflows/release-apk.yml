@@ -1,4 +1,4 @@
-name: Publish installable Android release
+name: Publish signed Android release
 
 on:
   workflow_run:
@@ -11,76 +11,107 @@ permissions:
   contents: write
 
 concurrency:
-  group: ashke-shadek-beta-release
+  group: ashke-shadek-signed-release
   cancel-in-progress: false
 
 jobs:
   publish:
-    # Never publish a per-run debug-signed APK as an in-place update.
-    # Enable only after permanent signing and the in-app updater are configured.
     if: ${{ github.event.workflow_run.conclusion == 'success' && vars.ASHKE_STABLE_RELEASE_READY == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository for GitHub CLI context
         uses: actions/checkout@v5
 
-      - name: Download installable APK from the successful build
+      - name: Confirm permanent signing secrets exist
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ASHKE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ASHKE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ASHKE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ASHKE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [[ -n "${KEYSTORE_BASE64:-}" && -n "${KEYSTORE_PASSWORD:-}" && -n "${KEY_ALIAS:-}" && -n "${KEY_PASSWORD:-}" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Publishing remains disabled: permanent signing secrets are missing."
+          fi
+
+      - name: Set up JDK 21
+        if: steps.signing.outputs.configured == 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download permanently signed APK
+        if: steps.signing.outputs.configured == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: ashke-shadek-installable-debug-apk
+          name: ashke-shadek-signed-release-apk
           path: release-assets
           repository: ${{ github.repository }}
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
 
-      - name: Prepare release file and checksum
+      - name: Prepare APK, metadata manifest and checksum
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          GH_REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          APK="$(find release-assets -type f -name '*.apk' -print -quit)"
-          if [ -z "$APK" ]; then
-            echo "The successful build did not contain an installable APK."
+          VERSION_CODE=$((1000 + RUN_NUMBER))
+          VERSION_NAME="1.1.${RUN_NUMBER}-beta"
+          TAG="v${VERSION_NAME}"
+          APK_SOURCE="$(find release-assets -type f -name '*.apk' -print -quit)"
+          test -n "$APK_SOURCE"
+          APK_NAME="Ashke-Shadek-${VERSION_NAME}.apk"
+          cp "$APK_SOURCE" "$APK_NAME"
+          APK_SHA="$(sha256sum "$APK_NAME" | cut -d' ' -f1)"
+          CERT_SHA="$(keytool -printcert -jarfile "$APK_NAME" | awk '/SHA256:/{gsub(":","",$2); print tolower($2); exit}')"
+          if [[ ! "$CERT_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Could not extract the APK signing certificate fingerprint."
             exit 1
           fi
-          cp "$APK" Ashke-Shadek-v1.0.0-beta.1.apk
-          sha256sum Ashke-Shadek-v1.0.0-beta.1.apk > SHA256SUMS.txt
-          cat > release-notes.md <<'EOF'
-          ## এশকে ছাদেক — Android beta
+          printf '%s  %s\n' "$APK_SHA" "$APK_NAME" > SHA256SUMS.txt
+          APK_URL="https://github.com/${GH_REPOSITORY}/releases/download/${TAG}/${APK_NAME}"
+          jq -n \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg versionName "$VERSION_NAME" \
+            --arg apkUrl "$APK_URL" \
+            --arg sha256 "$APK_SHA" \
+            --arg certificateSha256 "$CERT_SHA" \
+            --arg releaseNotes "মূল Word lyric emphasis, উন্নত অফলাইন বাংলা ভয়েস সার্চ, কম RAM ব্যবহার এবং যাচাইকৃত ইন-অ্যাপ আপডেট।" \
+            '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,certificateSha256:$certificateSha256,releaseNotes:$releaseNotes}' \
+            > update.json
+          cat > release-notes.md <<EOF
+          ## এশকে ছাদেক Android — ${VERSION_NAME}
 
-          Installable Android APK for the first offline Bengali voice-search beta.
-
-          ### What's included
-          - 615 Bengali songs across all three volumes, available offline.
-          - Responsive song reader with proportional source paragraph alignment.
-          - App-bundled Bengali offline voice recognition; it does not depend on the phone's installed speech-recognition service or Bengali language pack.
-          - Favourites, bookmarks, recent songs, last-read position, song-number jump, and text search.
-
-          ### Install
-          1. Download Ashke-Shadek-v1.0.0-beta.1.apk below.
-          2. Open it on Android and allow installation from the browser/file manager when Android asks.
-          3. Open voice search and grant microphone permission when prompted.
-
-          ### Compatibility and known limitations
-          - Minimum Android version: Android 5.0 (API 21).
-          - The APK is large because the speech model is bundled for offline use.
-          - Recognition latency and accuracy vary with device CPU, available RAM, microphone and background noise. Physical-device QA across manufacturers is still required.
-          - This beta is debug-signed for direct testing. It is not the final Play Store or production-signed build. Installing over a differently signed previous copy may require uninstalling that copy first; uninstalling removes its local favourites and bookmarks.
-
-          The attached SHA256SUMS file verifies the APK download.
+          - Bengali offline voice recognition uses the compact int8 streaming model.
+          - Voice recognition runs in an isolated short-lived process.
+          - Song lyrics are kept in one canonical copy with original Word paragraph emphasis.
+          - Search supports original, modern-spoken and phonetic Bengali variants.
+          - The app checks for releases and verifies APK checksum and signer before installation.
+          - Android still asks the user to confirm an update; same-signer updates preserve app data.
           EOF
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
 
-      - name: Create or refresh the beta GitHub release
+      - name: Create or refresh signed beta release
+        if: steps.signing.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v1.0.0-beta.1
+        shell: bash
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" Ashke-Shadek-v1.0.0-beta.1.apk SHA256SUMS.txt --clobber
+            gh release upload "$TAG" "$APK_NAME" update.json SHA256SUMS.txt --clobber
+            gh release edit "$TAG" --title "এশকে ছাদেক Android — $VERSION_NAME" --notes-file release-notes.md
           else
-            gh release create "$TAG" \
-              Ashke-Shadek-v1.0.0-beta.1.apk SHA256SUMS.txt \
-              --title "এশকে ছাদেক Android — First Offline ASR Beta" \
-              --prerelease \
-              --notes-file release-notes.md
+            gh release create "$TAG" "$APK_NAME" update.json SHA256SUMS.txt \
+              --title "এশকে ছাদেক Android — $VERSION_NAME" --prerelease --notes-file release-notes.md
           fi

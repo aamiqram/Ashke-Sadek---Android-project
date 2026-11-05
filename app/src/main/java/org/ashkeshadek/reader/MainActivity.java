@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.Context;
 import android.content.ComponentName;
 import android.content.ServiceConnection;
+import android.net.Uri;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -146,6 +147,16 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 26) lightSystemBars |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         if (lightSystemBars != 0) getWindow().getDecorView().setSystemUiVisibility(lightSystemBars);
         renderHome();
+        long lastUpdateCheck = prefs.getLong("last_update_check_ms", 0L);
+        if (System.currentTimeMillis() - lastUpdateCheck >= 24L * 60L * 60L * 1000L) {
+            prefs.edit().putLong("last_update_check_ms", System.currentTimeMillis()).apply();
+            checkForAppUpdates(false);
+        }
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        AppUpdater.resumePendingInstall(this);
     }
 
     private void loadCatalog() {
@@ -383,6 +394,107 @@ public class MainActivity extends Activity {
         fav.setOnClickListener(v -> renderSaved("favorites"));
         marks.setOnClickListener(v -> renderSaved("bookmarks"));
         body.addView(quick);
+
+        addSpace(body, 16);
+        LinearLayout updateCard = cardRow();
+        updateCard.addView(label("↻", 24, GREEN, true),
+                new LinearLayout.LayoutParams(dp(42), dp(42)));
+        LinearLayout updateInfo = new LinearLayout(this);
+        updateInfo.setOrientation(LinearLayout.VERTICAL);
+        updateInfo.addView(label("অ্যাপ আপডেট", 15, TEXT, true));
+        updateInfo.addView(label("নতুন সংস্করণ খুঁজুন", 12, MUTED, false));
+        updateCard.addView(updateInfo, new LinearLayout.LayoutParams(0, -2, 1f));
+        updateCard.addView(label("›", 24, GREEN, true));
+        updateCard.setOnClickListener(v -> checkForAppUpdates(true));
+        body.addView(updateCard, matchWrap());
+    }
+
+    private void checkForAppUpdates(boolean userInitiated) {
+        if (userInitiated) {
+            Toast.makeText(this, "নতুন সংস্করণ খোঁজা হচ্ছে…", Toast.LENGTH_SHORT).show();
+        }
+        AppUpdater.checkForUpdates(this, new AppUpdater.CheckCallback() {
+            @Override public void onUpdateAvailable(AppUpdater.UpdateInfo update) {
+                long dismissed = prefs.getLong("dismissed_update_version", 0L);
+                if (!userInitiated && dismissed == update.versionCode) return;
+                showUpdateAvailable(update);
+            }
+
+            @Override public void onNoUpdate() {
+                if (userInitiated) {
+                    Toast.makeText(MainActivity.this, "আপনার অ্যাপটি সর্বশেষ সংস্করণে আছে।",
+                            Toast.LENGTH_LONG).show();
+                }
+            }
+
+            @Override public void onError(String message) {
+                if (userInitiated) {
+                    Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+    }
+
+    private void showUpdateAvailable(AppUpdater.UpdateInfo update) {
+        StringBuilder message = new StringBuilder();
+        message.append("সংস্করণ ").append(update.versionName).append(" পাওয়া গেছে।");
+        if (!update.releaseNotes.trim().isEmpty()) {
+            message.append("\n\n").append(update.releaseNotes.trim());
+        }
+        if (update.requiresMigration) {
+            message.append("\n\nএটি বর্তমান ইনস্টল করা অ্যাপের সাইনিং সার্টিফিকেটে সই করা নয়। "
+                    + "একবারের মাইগ্রেশন প্রয়োজন; পুরোনো অ্যাপ আনইনস্টল করলে স্থানীয় প্রিয় গান ও বুকমার্ক মুছে যেতে পারে।");
+        } else {
+            message.append("\n\nAPK যাচাই করে Android-এর ইনস্টল নিশ্চিতকরণে আপডেট হবে। "
+                    + "একই সাইনিং কী থাকলে আপনার প্রিয় গান ও বুকমার্ক থাকবে।");
+        }
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle("নতুন আপডেট")
+                .setMessage(message.toString())
+                .setNegativeButton("পরে", (d, which) ->
+                        prefs.edit().putLong("dismissed_update_version", update.versionCode).apply());
+        if (update.requiresMigration) {
+            builder.setPositiveButton("রিলিজ পেজ খুলুন", (d, which) -> openUpdateReleasePage(update));
+        } else {
+            builder.setPositiveButton("ডাউনলোড ও ইনস্টল", (d, which) ->
+                    AppUpdater.downloadAndInstall(MainActivity.this, update,
+                            new AppUpdater.InstallCallback() {
+                @Override public void onStatus(String text) {
+                    Toast.makeText(MainActivity.this, text, Toast.LENGTH_SHORT).show();
+                }
+                @Override public void onPermissionRequired() {
+                    Toast.makeText(MainActivity.this,
+                            "Android সেটিংসে এই উৎস থেকে অ্যাপ ইনস্টল করার অনুমতি দিন; ফিরে এলে আপডেট শুরু হবে।",
+                            Toast.LENGTH_LONG).show();
+                }
+                @Override public void onMigrationRequired(String reason) {
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("একবার নতুন করে ইনস্টল প্রয়োজন")
+                            .setMessage(reason + "\n\nরিলিজ পেজ থেকে মাইগ্রেশন APK ইনস্টল করুন।")
+                            .setPositiveButton("রিলিজ পেজ", (ignored, button) -> openUpdateReleasePage(update))
+                            .setNegativeButton("এখন নয়", null)
+                            .show();
+                }
+                @Override public void onError(String error) {
+                    Toast.makeText(MainActivity.this, error, Toast.LENGTH_LONG).show();
+                }
+            }));
+        }
+        builder.show();
+    }
+
+    private void openUpdateReleasePage(AppUpdater.UpdateInfo update) {
+        try {
+            String url = update.releasePageUrl;
+            if (url == null || !url.startsWith(
+                    "https://github.com/aamiqram/Ashke-Sadek---Android-project/releases/")) {
+                url = "https://github.com/aamiqram/Ashke-Sadek---Android-project/releases";
+            }
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Exception error) {
+            Toast.makeText(this, "রিলিজ পেজ খোলা যায়নি।", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void renderVolume(int volume) {
