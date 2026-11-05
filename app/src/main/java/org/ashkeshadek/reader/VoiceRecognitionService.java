@@ -54,6 +54,7 @@ public final class VoiceRecognitionService extends Service {
             engine = new OfflineBengaliVoice(this, new OfflineBengaliVoice.Listener() {
                 @Override public void onStatus(String message) {
                     sendText(RESULT_STATUS, message);
+                    if (message.startsWith("প্রস্তুত")) logMemory("voice-model-loaded");
                 }
 
                 @Override public void onPartial(String text) {

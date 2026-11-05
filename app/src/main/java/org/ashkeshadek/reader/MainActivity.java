@@ -107,6 +107,7 @@ public class MainActivity extends Activity {
         recentIds = parseRecent(prefs.getString("recent", ""));
         loadCatalog();
         loadEmphasis();
+        logMemory("main-after-catalog");
         enforceStorageBudget();
         volumeNames.add("প্রথম খণ্ড");
         volumeNames.add("দ্বিতীয় খণ্ড");
