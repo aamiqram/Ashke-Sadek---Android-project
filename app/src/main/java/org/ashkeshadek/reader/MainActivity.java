@@ -5,6 +5,9 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.content.Intent;
+import android.content.Context;
+import android.content.ComponentName;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -14,6 +17,7 @@ import android.os.Debug;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ResultReceiver;
+import android.os.IBinder;
 import android.text.Editable;
 import android.text.Layout;
 import android.text.SpannableString;
@@ -86,7 +90,9 @@ public class MainActivity extends Activity {
     private EditText activeSearch;
     private EditText pendingVoiceTarget = null;
     private ResultReceiver voiceReceiver;
+    private ServiceConnection voiceServiceConnection;
     private boolean voiceServiceStarted;
+    private boolean voiceServiceBound;
     private AlertDialog voiceDialog;
     private TextView voiceStatus;
     private boolean voiceSessionCompleted = false;
@@ -819,6 +825,32 @@ public class MainActivity extends Activity {
                     .putExtra(VoiceRecognitionService.EXTRA_RECEIVER, voiceReceiver);
             startService(startIntent);
             voiceServiceStarted = true;
+            voiceServiceConnection = new ServiceConnection() {
+                @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+                    // A short-lived binding keeps the active ASR worker attached
+                    // to the visible activity while the user is recording.
+                }
+                @Override public void onServiceDisconnected(ComponentName name) {
+                    voiceServiceBound = false;
+                    if (voiceDialog != null && !voiceSessionCompleted) {
+                        finishVoiceDialog();
+                        Toast.makeText(MainActivity.this,
+                                "কম মেমরির কারণে ভয়েস প্রসেস বন্ধ হয়েছে। আবার চেষ্টা করুন।",
+                                Toast.LENGTH_LONG).show();
+                    }
+                }
+                @Override public void onBindingDied(ComponentName name) {
+                    onServiceDisconnected(name);
+                }
+                @Override public void onNullBinding(ComponentName name) {
+                    onServiceDisconnected(name);
+                }
+            };
+            voiceServiceBound = bindService(startIntent, voiceServiceConnection, Context.BIND_AUTO_CREATE);
+            if (!voiceServiceBound) {
+                sendVoiceServiceCommand(VoiceRecognitionService.ACTION_CANCEL);
+                throw new IllegalStateException("ভয়েস সার্ভিসে সংযোগ করা যায়নি।");
+            }
         } catch (Exception error) {
             finishVoiceDialog();
             Toast.makeText(this, "অফলাইন ভয়েস সার্ভিস চালু করা যায়নি।",
@@ -841,6 +873,14 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void unbindVoiceService() {
+        if (voiceServiceBound && voiceServiceConnection != null) {
+            try { unbindService(voiceServiceConnection); } catch (IllegalArgumentException ignored) { }
+        }
+        voiceServiceBound = false;
+        voiceServiceConnection = null;
+    }
+
     private void finishVoiceDialog() {
         voiceSessionCompleted = true;
         if (voiceDialog != null) {
@@ -851,6 +891,7 @@ public class MainActivity extends Activity {
         voiceStatus = null;
         voiceReceiver = null;
         voiceServiceStarted = false;
+        unbindVoiceService();
         voiceListeningStarted = false;
     }
 
@@ -861,6 +902,7 @@ public class MainActivity extends Activity {
         }
         voiceReceiver = null;
         voiceServiceStarted = false;
+        unbindVoiceService();
         voiceStatus = null;
         if (voiceDialog != null) {
             AlertDialog old = voiceDialog;
