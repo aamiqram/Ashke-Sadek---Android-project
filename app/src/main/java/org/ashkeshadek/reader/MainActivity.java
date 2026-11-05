@@ -61,8 +61,9 @@ import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
 /**
- * Ashke Shadek — lightweight, fully offline songbook reader.
- * No network permission, SDK dependency, analytics, third-party libraries or remote content.
+ * Ashke Shadek — native offline songbook reader.
+ * Network access is limited to verified GitHub app-update metadata and APK downloads.
+ * Songs and microphone audio stay on-device; no analytics or cloud speech service is used.
  */
 public class MainActivity extends Activity {
     private static final int BG = 0xFFF7F5EF;
@@ -1466,6 +1467,13 @@ public class MainActivity extends Activity {
     @Override protected void onStop() {
         if (voiceServiceStarted) cancelVoiceSession();
         super.onStop();
+    }
+
+    @Override public void onLowMemory() {
+        super.onLowMemory();
+        logMemory("system-low-memory");
+        if (voiceServiceStarted) cancelVoiceSession();
+        deleteDirectoryContents(getCacheDir());
     }
 
     @Override protected void onDestroy(){cancelVoiceSession();super.onDestroy();}

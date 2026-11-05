@@ -55,6 +55,7 @@ public final class VoiceRecognitionService extends Service {
                 @Override public void onStatus(String message) {
                     sendText(RESULT_STATUS, message);
                     if (message.startsWith("প্রস্তুত")) logMemory("voice-model-loaded");
+                    else if (message.startsWith("শুনছি")) logMemory("voice-capture-active");
                 }
 
                 @Override public void onPartial(String text) {
