@@ -86,7 +86,7 @@ final class OfflineBengaliVoice {
             model.setDebug(false);model.setProvider("cpu");model.setModelType("zipformer2");
             OnlineRecognizerConfig config=new OnlineRecognizerConfig();
             config.setFeatConfig(feature);config.setModelConfig(model);config.setEnableEndpoint(true);
-            recognizer=new OnlineRecognizer(context.getAssets(),config);stream=recognizer.createStream();
+            recognizer=new OnlineRecognizer(context.getAssets(),config);stream=recognizer.createStream("");
 
             AudioInput input=createAudioInput();
             audio=input.record;
