@@ -1,34 +1,92 @@
-plugins {
-    id 'com.android.application'
-}
+plugins { id 'com.android.application' }
+
+def sherpaVersion='2.0.1'
+def sherpaAar=layout.buildDirectory.file("offline-dependencies/sherpa-onnx-${sherpaVersion}.aar")
+def modelArchive=layout.buildDirectory.file("offline-dependencies/sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09.tar.bz2")
+def generatedVoiceAssets=layout.buildDirectory.dir("generated/offline-voice-assets")
+def modelFolder='sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09'
 
 android {
     namespace 'org.ashkeshadek.reader'
     compileSdk 36
-
-    defaultConfig {
-        applicationId 'org.ashkeshadek.reader'
-        minSdk 21
-        targetSdk 36
-        versionCode 1
-        versionName '1.0.0'
-    }
-
+    defaultConfig { applicationId 'org.ashkeshadek.reader'; minSdk 21; targetSdk 36; versionCode 1; versionName '1.0.0' }
+    sourceSets { main { assets.srcDir(generatedVoiceAssets) } }
     buildTypes {
-        release {
-            minifyEnabled true
-            shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-        }
+        release { minifyEnabled true; shrinkResources true; proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),'proguard-rules.pro' }
         debug { minifyEnabled false }
     }
-
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
-    }
-
-    packaging {
-        resources { excludes += ['META-INF/DEPENDENCIES', 'META-INF/LICENSE*', 'META-INF/NOTICE*'] }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    packaging { resources { excludes += ['META-INF/DEPENDENCIES'] } }
+}
+dependencies {
+    implementation files(sherpaAar)
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.7.20'
+}
+tasks.register('prepareOfflineVoiceAssets') {
+    group='build setup'
+    description='Downloads and verifies pinned Bengali offline ASR runtime and model.'
+    outputs.dir(generatedVoiceAssets)
+    outputs.file(sherpaAar)
+    doLast {
+        def downloadFile={String url,File destination->
+            if(destination.exists()&&destination.length()>0)return
+            destination.parentFile.mkdirs()
+            File partial=new File(destination.parentFile,destination.name+'.part');partial.delete()
+            def connection=new URL(url).openConnection()
+            connection.setConnectTimeout(45000);connection.setReadTimeout(300000)
+            connection.setRequestProperty('User-Agent','AshkeShadek-Android-Build/1.0')
+            connection.getInputStream().withCloseable{input->
+                partial.withOutputStream{output->
+                    byte[] buffer=new byte[1024*1024];int count
+                    while((count=input.read(buffer))!=-1)output.write(buffer,0,count)
+                }
+            }
+            if(!partial.exists()||partial.length()==0)throw new GradleException("Empty download: ${url}")
+            if(!partial.renameTo(destination)){
+                java.nio.file.Files.move(partial.toPath(),destination.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+        }
+        def sha256={File file->
+            def digest=java.security.MessageDigest.getInstance('SHA-256')
+            file.withInputStream{input->
+                byte[] buffer=new byte[1024*1024];int count
+                while((count=input.read(buffer))!=-1)digest.update(buffer,0,count)
+            }
+            digest.digest().collect{String.format('%02x',it)}.join()
+        }
+        File aar=sherpaAar.get().asFile
+        downloadFile("https://github.com/k2-fsa/sherpa-onnx/releases/download/v${sherpaVersion}/sherpa-onnx-${sherpaVersion}.aar",aar)
+        if(sha256(aar)!='a8d09d1d32f3eb8520482c6d3d43fae674681c5b050385967c70a3c2c9bf0ee7'){
+            aar.delete();throw new GradleException('sherpa-onnx AAR SHA-256 mismatch.')
+        }
+        File licenseSource=new File(layout.buildDirectory.get().asFile,'offline-dependencies/APACHE-2.0.txt')
+        downloadFile('https://www.apache.org/licenses/LICENSE-2.0.txt',licenseSource)
+        File archive=modelArchive.get().asFile
+        downloadFile("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09.tar.bz2",archive)
+        if(sha256(archive)!='1bc89d81ee33ba7ddef8454736aeeb55e3cc1593274272485c6da342202b4b18'){
+            archive.delete();throw new GradleException('Bengali model SHA-256 mismatch.')
+        }
+        File extractionRoot=new File(layout.buildDirectory.get().asFile,'offline-voice-model-extracted')
+        File modelSource=new File(extractionRoot,modelFolder)
+        File destinationRoot=new File(generatedVoiceAssets.get().asFile,modelFolder)
+        if(!(new File(modelSource,'encoder.onnx').exists()&&new File(modelSource,'decoder.onnx').exists()
+                &&new File(modelSource,'joiner.onnx').exists()&&new File(modelSource,'tokens.txt').exists())){
+            project.delete(extractionRoot);extractionRoot.mkdirs()
+            exec{commandLine 'tar','-xjf',archive.absolutePath,'-C',extractionRoot.absolutePath}
+        }
+        ['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].each{fileName->
+            File source=new File(modelSource,fileName)
+            if(!source.isFile()||source.length()<(fileName=='encoder.onnx'?80L*1024L*1024L:1024L))
+                throw new GradleException("Bengali model missing/incomplete: ${fileName}")
+            File destination=new File(destinationRoot,fileName);destination.parentFile.mkdirs()
+            if(!destination.exists()||destination.length()!=source.length())
+                java.nio.file.Files.copy(source.toPath(),destination.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
+        File licenseDestination=new File(generatedVoiceAssets.get().asFile,'third_party/APACHE-2.0.txt')
+        licenseDestination.parentFile.mkdirs()
+        if(!licenseDestination.exists()||licenseDestination.length()!=licenseSource.length())
+            java.nio.file.Files.copy(licenseSource.toPath(),licenseDestination.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        logger.lifecycle("Prepared bundled Bengali offline speech assets at ${generatedVoiceAssets.get().asFile}")
     }
 }
+tasks.named('preBuild').configure { dependsOn tasks.named('prepareOfflineVoiceAssets') }

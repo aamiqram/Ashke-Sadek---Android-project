@@ -2,16 +2,13 @@ package org.ashkeshadek.reader;
 
 import android.Manifest;
 import android.app.Activity;
-import android.content.Intent;
+import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
-import android.speech.RecognitionListener;
-import android.speech.RecognizerIntent;
-import android.speech.SpeechRecognizer;
 import android.text.Editable;
 import android.text.Layout;
 import android.text.SpannableString;
@@ -21,7 +18,6 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
-import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -80,11 +76,11 @@ public class MainActivity extends Activity {
     private Song currentSong;
     private ScrollView readerScroll;
     private EditText activeSearch;
-    private SpeechRecognizer speechRecognizer;
     private EditText pendingVoiceTarget = null;
-    private boolean voiceAvailable = false;
-    private String voiceLang = "bn-BD";
-    private boolean voiceRetried = false;
+    private OfflineBengaliVoice offlineVoice;
+    private AlertDialog voiceDialog;
+    private TextView voiceStatus;
+    private boolean voiceSessionCompleted = false;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -98,7 +94,6 @@ public class MainActivity extends Activity {
         volumeNames.add("প্রথম খণ্ড");
         volumeNames.add("দ্বিতীয় খণ্ড");
         volumeNames.add("তৃতীয় খণ্ড");
-        voiceAvailable = SpeechRecognizer.isRecognitionAvailable(this);
         getWindow().setStatusBarColor(Build.VERSION.SDK_INT >= 23 ? BG : GREEN_DARK);
         getWindow().setNavigationBarColor(Build.VERSION.SDK_INT >= 26 ? BG : GREEN_DARK);
         int lightSystemBars = 0;
@@ -261,7 +256,7 @@ public class MainActivity extends Activity {
         TextView mic = actionButton("🎙", "ভয়েস");
         LinearLayout.LayoutParams micLp = new LinearLayout.LayoutParams(dp(66), dp(52)); micLp.leftMargin = dp(8);
         searchRow.addView(mic, micLp);
-        mic.setOnClickListener(v -> startVoice(search));
+        mic.setOnClickListener(v -> startOfflineVoice(search));
         body.addView(searchRow);
         LinearLayout results = new LinearLayout(this); results.setOrientation(LinearLayout.VERTICAL);
         body.addView(results);
@@ -413,14 +408,31 @@ public class MainActivity extends Activity {
         currentScreen="reader"; currentSong=song;
         mount("গান "+bn(song.number),volumeNames.get(song.volume-1),true,false);
         TextView headerSearch = iconButton("⌕", 22);
-        headerSearch.setOnClickListener(v -> startVoice(null));
+        headerSearch.setOnClickListener(v -> startOfflineVoice(null));
         LinearLayout.LayoutParams hsLp = new LinearLayout.LayoutParams(dp(42), dp(42));
         ((LinearLayout) root.getChildAt(0)).addView(headerSearch, hsLp);
         FrameLayout frame=new FrameLayout(this);
         page.addView(frame,new LinearLayout.LayoutParams(-1,0,1f));
-        readerScroll=new ScrollView(this); readerScroll.setFillViewport(true); readerScroll.setClipToPadding(false);
+        readerScroll=new ScrollView(this);
+        readerScroll.setFillViewport(true);
+        readerScroll.setClipToPadding(false);
         frame.addView(readerScroll,new FrameLayout.LayoutParams(-1,-1));
-        LinearLayout body=new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL); body.setPadding(dp(20),dp(10),dp(20),dp(36)); readerScroll.addView(body);
+
+        float density = getResources().getDisplayMetrics().density;
+        float screenWidthDp = getResources().getDisplayMetrics().widthPixels / density;
+        int availableWidth = Math.max(dp(200), getResources().getDisplayMetrics().widthPixels - dp(28));
+        int readerWidth = Math.min(availableWidth, dp(760));
+        int textMeasure = Math.max(dp(168), readerWidth - dp(32));
+        final float wordTextWidthPt = 671.8f;
+
+        FrameLayout sheet = new FrameLayout(this);
+        readerScroll.addView(sheet, new ScrollView.LayoutParams(-1, -2));
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), dp(10), dp(16), dp(112));
+        FrameLayout.LayoutParams bodyParams = new FrameLayout.LayoutParams(
+                readerWidth, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        sheet.addView(body, bodyParams);
 
         TextView meta=label(volumeNames.get(song.volume-1)+"  ·  গান "+bn(song.number),12,GREEN,true);
         meta.setGravity(Gravity.CENTER); body.addView(meta,matchWrap()); addSpace(body,12);
@@ -446,26 +458,35 @@ public class MainActivity extends Activity {
         favorite.setOnClickListener(v->{toggleSet(favorites,song.id,"favorites");favorite.setText(favorites.contains(song.id)?"♥\nপ্রিয়":"♡\nপ্রিয়");favorite.setTextColor(favorites.contains(song.id)?GREEN:TEXT);});
         bookmark.setOnClickListener(v->{toggleSet(bookmarks,song.id,"bookmarks");bookmark.setText(bookmarks.contains(song.id)?"▣\nবুকমার্ক":"▢\nবুকমার্ক");bookmark.setTextColor(bookmarks.contains(song.id)?GREEN:TEXT);});
 
-        int lyricSize = fitLyricSize(song);
+        int lyricSizeSp = screenWidthDp < 370f ? 17 : (screenWidthDp < 600f ? 18 : 19);
         for (LyricBlock block : song.lyricBlocks) {
-            TextView lyricLine = label(block.text, lyricSize, TEXT, false);
+            TextView lyricLine = label(block.text, lyricSizeSp, TEXT, false);
             int gravity = block.alignment == 1 ? Gravity.CENTER_HORIZONTAL
                     : block.alignment == 2 ? Gravity.RIGHT : Gravity.LEFT;
             lyricLine.setGravity(gravity);
-            lyricLine.setLineSpacing(dp(7), 1.16f);
-            int leftIndent = pointsToPx(block.leftIndentPt);
-            int firstIndent = Math.max(0, leftIndent + pointsToPx(block.firstLineIndentPt));
+            if (Build.VERSION.SDK_INT >= 23) {
+                lyricLine.setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY);
+                lyricLine.setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE);
+            }
+            if (block.alignment == 3 && Build.VERSION.SDK_INT >= 26) {
+                lyricLine.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD);
+            }
+            lyricLine.setLineSpacing(dp(5), 1.20f);
+            int leftIndent = responsiveWordMeasure(block.leftIndentPt, textMeasure, wordTextWidthPt);
+            int firstIndent = Math.max(0, leftIndent + responsiveWordMeasure(
+                    block.firstLineIndentPt, textMeasure, wordTextWidthPt));
             if (leftIndent > 0 || firstIndent > 0) {
                 SpannableString styled = new SpannableString(block.text);
                 styled.setSpan(new LeadingMarginSpan.Standard(firstIndent, leftIndent),
                         0, styled.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 lyricLine.setText(styled);
             }
-            lyricLine.setPadding(dp(2), 0, pointsToPx(block.rightIndentPt), 0);
+            lyricLine.setPadding(dp(1), 0,
+                    responsiveWordMeasure(block.rightIndentPt, textMeasure, wordTextWidthPt), 0);
             lyricLine.setTextIsSelectable(true);
             LinearLayout.LayoutParams lyricParams = matchWrap();
-            lyricParams.topMargin = pointsToPx(block.spaceBeforePt);
-            lyricParams.bottomMargin = pointsToPx(block.spaceAfterPt);
+            lyricParams.topMargin = responsiveWordMeasure(block.spaceBeforePt, textMeasure, wordTextWidthPt);
+            lyricParams.bottomMargin = responsiveWordMeasure(block.spaceAfterPt, textMeasure, wordTextWidthPt);
             body.addView(lyricLine, lyricParams);
         }
         addSpace(body,26);
@@ -489,14 +510,7 @@ public class MainActivity extends Activity {
         tools.addView(toTop, topLp);
         addSpace(body, 18);
         body.addView(tools);
-        find.setOnClickListener(v->{
-            if (voiceAvailable) startVoice(null);
-            else {
-                renderIndex();
-                Toast.makeText(this,"এই ফোনে ভয়েস সার্চ নেই। গানের নাম লিখে খুঁজুন।",Toast.LENGTH_LONG).show();
-                if(activeSearch!=null) activeSearch.requestFocus();
-            }
-        });
+        find.setOnClickListener(v -> startOfflineVoice(null));
         toTop.setOnClickListener(v->readerScroll.smoothScrollTo(0,0));
         readerScroll.post(() -> {
             if (song.id.equals(prefs.getString("last_song", ""))) {
@@ -506,107 +520,146 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** One font size for the whole song so its longest line still fits on a single line. */
-    private int fitLyricSize(Song song) {
-        float available = getResources().getDisplayMetrics().widthPixels - dp(40);
-        android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        float best = 20f;
-        for (LyricBlock block : song.lyricBlocks) {
-            int indent = Math.max(0, pointsToPx(block.leftIndentPt))
-                    + Math.max(0, pointsToPx(block.firstLineIndentPt));
-            float width = available - indent - Math.max(0, pointsToPx(block.rightIndentPt));
-            if (width <= 0 || block.text.isEmpty()) continue;
-            paint.setTextSize(pxToSp(20f));
-            float needed = paint.measureText(block.text);
-            if (needed > width) best = Math.min(best, 20f * width / needed);
-        }
-        return Math.max(11, Math.min(20, (int) Math.floor(best)));
-    }
-
-    private float pxToSp(float sp) {
-        return android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, sp,
-                getResources().getDisplayMetrics());
-    }
-
     private void toggleSet(Set<String> set,String id,String key){
         if(set.contains(id))set.remove(id);else set.add(id);
         prefs.edit().putStringSet(key,new HashSet<>(set)).apply();
     }
 
-    private void startVoice(EditText target) {
-        if(!SpeechRecognizer.isRecognitionAvailable(this)){
-            Toast.makeText(this,"এই ফোনে অফলাইন বাংলা ভয়েস সার্চ পাওয়া যাচ্ছে না। গানের নাম লিখে খুঁজুন।",Toast.LENGTH_LONG).show();
-            if(target!=null){target.requestFocus();((InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(target,InputMethodManager.SHOW_IMPLICIT);}
-            else {
-                renderIndex();
-                Toast.makeText(this,"এখানে লিখে গানের নাম বা লাইন খুঁজুন।",Toast.LENGTH_SHORT).show();
-                if(activeSearch!=null) activeSearch.requestFocus();
-            }
-            return;
-        }
+    private void startOfflineVoice(EditText target) {
         if (Build.VERSION.SDK_INT >= 23
                 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             pendingVoiceTarget = target;
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, MIC_PERMISSION);
             return;
         }
-        try {
-            if(speechRecognizer!=null){speechRecognizer.destroy();speechRecognizer=null;}
-            speechRecognizer=SpeechRecognizer.createSpeechRecognizer(this);
-            speechRecognizer.setRecognitionListener(new RecognitionListener(){
-                @Override public void onReadyForSpeech(Bundle params){Toast.makeText(MainActivity.this,"বলুন, কোন গানটি খুঁজছেন…",Toast.LENGTH_SHORT).show();}
-                @Override public void onBeginningOfSpeech(){}
-                @Override public void onRmsChanged(float rmsdB){}
-                @Override public void onBufferReceived(byte[] buffer){}
-                @Override public void onEndOfSpeech(){}
-                @Override public void onError(int error){
-                    if (error == 12 && "bn-BD".equals(voiceLang) && !voiceRetried) {
-                        voiceRetried = true; voiceLang = "en-US"; destroyRecognizer(); startVoice(target); return;
-                    }
-                    destroyRecognizer();
-                    Toast.makeText(MainActivity.this,"কথাটি বোঝা যায়নি। লিখে গান খুঁজুন।",Toast.LENGTH_LONG).show();
-                    if (target == null) renderIndex();
-                }
-                @Override public void onResults(Bundle results){
-                    ArrayList<String> words=results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                    if(words!=null&&!words.isEmpty()){
-                        String phrase=words.get(0);
-                        if (handleReaderVoiceCommand(phrase)) { destroyRecognizer(); return; }
-                        Song direct=resolveDirectJump(phrase,currentSong != null ? currentSong.volume : 0);
-                        if(direct!=null){destroyRecognizer();openSong(direct);return;}
-                        if(target!=null){target.setText(phrase);target.setSelection(target.length());}
-                        else {destroyRecognizer();renderIndex(); if(activeSearch!=null){activeSearch.setText(phrase);activeSearch.setSelection(activeSearch.length());}}
-                    }
-                    destroyRecognizer();
-                }
-                @Override public void onPartialResults(Bundle partialResults){}
-                @Override public void onEvent(int eventType,Bundle params){}
-            });
-            Intent intent=new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, voiceLang);
-            intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS,3);
-            intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS,true);
-            speechRecognizer.startListening(intent);
-        } catch(Exception e){
-            destroyRecognizer();
-            Toast.makeText(this,"অফলাইন ভয়েস সার্চ চালু করা যায়নি। লিখে গান খুঁজুন।",Toast.LENGTH_LONG).show();
-            if (target == null) renderIndex();
+        cancelVoiceSession();
+        voiceSessionCompleted = false;
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(24), dp(10), dp(24), dp(18));
+        TextView icon = label("🎙", 30, GREEN, true);
+        icon.setGravity(Gravity.CENTER);
+        content.addView(icon, matchWrap());
+        voiceStatus = label("বাংলা অফলাইন মডেল চালু হচ্ছে…", 15, TEXT, true);
+        voiceStatus.setGravity(Gravity.CENTER);
+        voiceStatus.setPadding(0, dp(12), 0, dp(8));
+        content.addView(voiceStatus, matchWrap());
+        TextView hint = label("গানের নাম, গানের কোনো লাইন অথবা গান নম্বর বলুন।", 13, MUTED, false);
+        hint.setGravity(Gravity.CENTER);
+        content.addView(hint, matchWrap());
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("বাংলা ভয়েস সার্চ")
+                .setView(content)
+                .setNegativeButton("বাতিল", (d, which) -> cancelVoiceSession())
+                .setPositiveButton("শেষ করুন", null)
+                .create();
+        voiceDialog = dialog;
+        dialog.setCanceledOnTouchOutside(false);
+        dialog.setOnDismissListener(d -> {
+            if (!voiceSessionCompleted && offlineVoice != null) {
+                offlineVoice.cancel();
+                offlineVoice = null;
+            }
+        });
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            if (offlineVoice != null) {
+                voiceStatus.setText("কথা শনাক্ত করা হচ্ছে…");
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+                offlineVoice.finish();
+            }
+        });
+
+        offlineVoice = new OfflineBengaliVoice(this, new OfflineBengaliVoice.Listener() {
+            @Override public void onStatus(String message) {
+                if (voiceStatus != null) voiceStatus.setText(message);
+                if (message.startsWith("শুনছি") && voiceDialog != null)
+                    voiceDialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+            }
+            @Override public void onPartial(String text) {
+                if (voiceStatus != null) voiceStatus.setText("শুনছি…\n" + text);
+            }
+            @Override public void onResult(String phrase) {
+                finishVoiceDialog();
+                handleVoiceSearchResult(target, phrase);
+            }
+            @Override public void onError(String message) {
+                finishVoiceDialog();
+                Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+                if (target == null) {
+                    renderIndex();
+                    if (activeSearch != null) activeSearch.requestFocus();
+                } else target.requestFocus();
+            }
+        });
+        offlineVoice.start();
+    }
+
+    private void finishVoiceDialog() {
+        voiceSessionCompleted = true;
+        if (voiceDialog != null) {
+            AlertDialog old = voiceDialog;
+            voiceDialog = null;
+            old.dismiss();
+        }
+        voiceStatus = null;
+        offlineVoice = null;
+    }
+
+    private void cancelVoiceSession() {
+        voiceSessionCompleted = true;
+        if (offlineVoice != null) {
+            offlineVoice.cancel();
+            offlineVoice = null;
+        }
+        voiceStatus = null;
+        if (voiceDialog != null) {
+            AlertDialog old = voiceDialog;
+            voiceDialog = null;
+            old.dismiss();
         }
     }
 
-    private void destroyRecognizer(){if(speechRecognizer!=null){try{speechRecognizer.destroy();}catch(Exception ignored){}speechRecognizer=null;}}
+    private void handleVoiceSearchResult(EditText target, String phrase) {
+        if (phrase == null || phrase.trim().isEmpty()) {
+            Toast.makeText(this, "কোনো কথা শনাক্ত হয়নি। আবার বলুন অথবা লিখে খুঁজুন।",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        phrase = phrase.trim();
+        if (handleReaderVoiceCommand(phrase)) return;
+        Song direct = resolveDirectJump(phrase, currentSong != null ? currentSong.volume : 0);
+        if (direct != null) {
+            openSong(direct);
+            return;
+        }
+        if (target != null) {
+            target.setText(phrase);
+            target.setSelection(target.length());
+        } else {
+            renderIndex();
+            if (activeSearch != null) {
+                activeSearch.setText(phrase);
+                activeSearch.setSelection(activeSearch.length());
+            }
+        }
+    }
 
-    @Override public void onRequestPermissionsResult(int requestCode,String[] permissions,int[] grantResults){
-        super.onRequestPermissionsResult(requestCode,permissions,grantResults);
-        if(requestCode==MIC_PERMISSION){
-            boolean ok=grantResults.length>0&&grantResults[0]==PackageManager.PERMISSION_GRANTED;
-            EditText target=pendingVoiceTarget;
-            pendingVoiceTarget=null;
-            if (ok) {
-                startVoice(target);
-            } else {
-                Toast.makeText(this, "ভয়েস সার্চের অনুমতি দেওয়া হয়নি। লিখে খুঁজতে পারবেন।", Toast.LENGTH_LONG).show();
+    @Override public void onRequestPermissionsResult(
+            int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == MIC_PERMISSION) {
+            boolean ok = grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            EditText target = pendingVoiceTarget;
+            pendingVoiceTarget = null;
+            if (ok) startOfflineVoice(target);
+            else {
+                Toast.makeText(this, "ভয়েস সার্চের অনুমতি দেওয়া হয়নি। লিখে খুঁজতে পারবেন।",
+                        Toast.LENGTH_LONG).show();
                 if (target == null) renderIndex();
             }
         }
@@ -708,7 +761,10 @@ public class MainActivity extends Activity {
     private GradientDrawable roundFill(int color,int radius){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(radius));return d;}
     private GradientDrawable roundStroke(int color,int stroke,int radius){GradientDrawable d=roundFill(color,radius);d.setStroke(dp(1),stroke);return d;}
     private int dp(float value){return (int)(value*getResources().getDisplayMetrics().density+0.5f);}
-    private int pointsToPx(float points){return Math.round(points*getResources().getDisplayMetrics().densityDpi/72f);}
+    private int responsiveWordMeasure(float points, int contentWidthPx, float sourceWidthPt) {
+        if (points <= 0f || contentWidthPx <= 0 || sourceWidthPt <= 0f) return 0;
+        return Math.max(0, Math.round(points * contentWidthPx / sourceWidthPt));
+    }
     private LinearLayout.LayoutParams matchWrap(){return new LinearLayout.LayoutParams(-1,-2);}
     private LinearLayout.LayoutParams matchHeight(int height){return new LinearLayout.LayoutParams(-1,dp(height));}
     private void addSpace(LinearLayout parent,int height){View v=new View(this);parent.addView(v,new LinearLayout.LayoutParams(1,dp(height)));}
@@ -732,6 +788,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onPause() {
         saveReaderPosition();
+        if (offlineVoice != null) cancelVoiceSession();
         super.onPause();
     }
 
@@ -780,7 +837,7 @@ public class MainActivity extends Activity {
         if (level >= TRIM_MEMORY_RUNNING_LOW) deleteDirectoryContents(getCacheDir());
     }
 
-    @Override protected void onDestroy(){destroyRecognizer();super.onDestroy();}
+    @Override protected void onDestroy(){cancelVoiceSession();super.onDestroy();}
 
     private static class Song {
         final String id; final int volume; final int number; final String title; final String lyrics; final String firstLine;

@@ -1,32 +1,24 @@
 এশকে ছাদেক Android app — build status
 
-Project source: prepared
-Offline song catalogue: 615 songs validated (82 + 289 + 244)
-Lyric source: original Word file only
-Index title/order source: corrected Word copy
-Original source file: unchanged; SHA-256 verified
-Runtime dependencies: none beyond Android framework
-Internet permission: not declared
-Minimum Android: 5.0 / API 21
-Voice search: on-device only when supported; text search fallback
-Persistent user data: bounded to song IDs, 12 recent songs, and per-song scroll offsets
-Disposable cache policy: 1 MiB budget; cleared on memory pressure
-Catalogue asset: 217,185 bytes compressed; 2,347,190 bytes expanded
+Base: latest remote main including catalogue fallback and latest search/navigation.
+Catalogue: 615 songs (82 + 289 + 244), preserving 6,246 lyric paragraph blocks.
+Original Word lyric source unchanged; corrected copy supplies index order only.
+Min Android: 5.0 / API 21. Installed app declares no INTERNET permission.
+RECORD_AUDIO is requested only when voice search is used.
 
-Validation completed:
-- 615 unique song IDs and continuous volume numbering
-- All 6,246 Word lyric paragraphs preserved in catalogue blocks
-- All songs have titles and lyrics
-- XML resources parse
-- Manifest has no INTERNET permission; microphone is optional
-- Original and corrected Word file hashes match the recorded source hashes
-- Java syntax parsing passed
+Reader updates:
+- Centered reading column capped at 760 dp for wider devices.
+- Word indents, first-line offsets, right indents and paragraph spacing scale to available width.
+- Screen-aware type size, high-quality line breaking, no auto-hyphenation, selectable lyrics.
+- Long source paragraphs wrap naturally instead of shrinking all lines across the song.
+- Original PDF is a source-format reference, not the app UI template.
 
-Not completed in this environment:
-- Android Gradle compilation
-- APK generation and measured APK / installed size
-- Emulator or physical-phone QA
-- Bengali on-device speech recognition QA across devices
-- Permanent release signing
+Voice:
+- Bundled sherpa-onnx Android runtime 2.0.1 and Bengali streaming Zipformer/Vosk model.
+- Does not depend on system/vendor SpeechRecognizer or preinstalled Bengali offline speech.
+- Local microphone capture at 16 kHz / 48 kHz / 44.1 kHz with local resampling to 16 kHz.
+- Build-time downloads SHA-256 verified; no runtime model download.
+- Model archive ~87 MB compressed / extracted model ~203 MB; AAR ~49 MB. Substantial package size increase.
+- Physical-device accuracy, latency, RAM/thermal effects still require QA.
 
-Reason: no Android SDK, Android platform android.jar, Gradle executable, or Gradle wrapper is installed in the build workspace. Network access to download missing build tools is unavailable. The project includes a GitHub Actions workflow configured with Android Gradle Plugin 9.5.0, Gradle 9.6.0, JDK 17, SDK 36 and Build Tools 36.0.0 to run the actual build in a provisioned environment.
+Previous remote version compiled and produced debug/release APK artifacts. New ASR JNI and responsive reader revision requires a new CI compile, package-size check and real-device QA. Release signing remains outstanding.
