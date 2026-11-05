@@ -89,14 +89,9 @@ final class OfflineBengaliVoice {
             OnlineRecognizerConfig config=new OnlineRecognizerConfig();
             config.setFeatConfig(feature);config.setModelConfig(model);
 
-            // Do not treat startup silence as the end of a user's utterance.
-            // Rule 1 in sherpa-onnx defaults to 2.4 seconds of silence even
-            // when no speech has been detected.
-            EndpointConfig endpoints=new EndpointConfig();
-            endpoints.setRule1(new EndpointRule(true,2.4f,0.0f));
-            endpoints.setRule2(new EndpointRule(true,1.2f,0.0f));
-            endpoints.setRule3(new EndpointRule(false,0.0f,20.0f));
-            config.setEndpointConfig(endpoints);
+            // Endpoint boundaries split phrases; they must never end this session.
+            // The pinned AAR's default rule can also detect initial silence, so
+            // the capture loop below resets the stream and continues listening.
             config.setEnableEndpoint(true);
 
             recognizer=new OnlineRecognizer(context.getAssets(),config);stream=recognizer.createStream("");
