@@ -10,7 +10,7 @@ android {
     namespace 'org.ashkeshadek.reader'
     compileSdk 36
     defaultConfig { applicationId 'org.ashkeshadek.reader'; minSdk 21; targetSdk 36; versionCode 1; versionName '1.0.0' }
-    sourceSets { main { assets.srcDir(generatedVoiceAssets) } }
+    sourceSets { main { assets.srcDir(layout.buildDirectory.dir('generated/offline-voice-assets').get().asFile) } }
     buildTypes {
         release { minifyEnabled true; shrinkResources true; proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),'proguard-rules.pro' }
         debug { minifyEnabled false }

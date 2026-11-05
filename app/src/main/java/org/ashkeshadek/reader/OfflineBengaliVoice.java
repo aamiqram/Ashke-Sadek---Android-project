@@ -73,6 +73,7 @@ final class OfflineBengaliVoice {
     private void runRecognition(){
         OnlineRecognizer recognizer=null;OnlineStream stream=null;AudioRecord audio=null;boolean delivered=false;
         try{
+            if(cancelled||stopRequested)return;
             status("বাংলা অফলাইন মডেল চালু হচ্ছে…");
             FeatureConfig feature=new FeatureConfig();feature.setSampleRate(MODEL_RATE);feature.setFeatureDim(80);
             OnlineTransducerModelConfig transducer=new OnlineTransducerModelConfig();
@@ -87,7 +88,13 @@ final class OfflineBengaliVoice {
             config.setFeatConfig(feature);config.setModelConfig(model);config.setEnableEndpoint(true);
             recognizer=new OnlineRecognizer(context.getAssets(),config);stream=recognizer.createStream();
 
-            AudioInput input=createAudioInput();audio=input.record;recorder=audio;audio.startRecording();
+            AudioInput input=createAudioInput();
+            audio=input.record;
+            recorder=audio;
+            // The user may cancel while the speech model is being initialized.
+            // Do not open the microphone after that cancellation.
+            if(cancelled||stopRequested)return;
+            audio.startRecording();
             if(audio.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING)
                 throw new IllegalStateException("মাইক্রোফোন রেকর্ডিং শুরু করতে পারেনি।");
             status("শুনছি… বাংলায় গানের নাম বা লাইন বলুন।");
