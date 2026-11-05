@@ -1,0 +1,32 @@
+এশকে ছাদেক Android app — build status
+
+Project source: prepared
+Offline song catalogue: 615 songs validated (82 + 289 + 244)
+Lyric source: original Word file only
+Index title/order source: corrected Word copy
+Original source file: unchanged; SHA-256 verified
+Runtime dependencies: none beyond Android framework
+Internet permission: not declared
+Minimum Android: 5.0 / API 21
+Voice search: on-device only when supported; text search fallback
+Persistent user data: bounded to song IDs, 12 recent songs, and per-song scroll offsets
+Disposable cache policy: 1 MiB budget; cleared on memory pressure
+Catalogue asset: 217,185 bytes compressed; 2,347,190 bytes expanded
+
+Validation completed:
+- 615 unique song IDs and continuous volume numbering
+- All 6,246 Word lyric paragraphs preserved in catalogue blocks
+- All songs have titles and lyrics
+- XML resources parse
+- Manifest has no INTERNET permission; microphone is optional
+- Original and corrected Word file hashes match the recorded source hashes
+- Java syntax parsing passed
+
+Not completed in this environment:
+- Android Gradle compilation
+- APK generation and measured APK / installed size
+- Emulator or physical-phone QA
+- Bengali on-device speech recognition QA across devices
+- Permanent release signing
+
+Reason: no Android SDK, Android platform android.jar, Gradle executable, or Gradle wrapper is installed in the build workspace. Network access to download missing build tools is unavailable. The project includes a GitHub Actions workflow configured with Android Gradle Plugin 9.5.0, Gradle 9.6.0, JDK 17, SDK 36 and Build Tools 36.0.0 to run the actual build in a provisioned environment.
