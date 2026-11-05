@@ -36,11 +36,15 @@ def main() -> None:
                         help="Corrected Word copy used only for index titles/order")
     parser.add_argument("--output", type=Path,
                         default=ROOT / "app/src/main/assets/songs.json.gz")
+    parser.add_argument("--emphasis-output", type=Path,
+                        default=ROOT / "app/src/main/assets/lyrics_emphasis.json.gz",
+                        help="Compact run-level bold ranges, in flattened lyric-block order")
     args = parser.parse_args()
 
     original_path = args.original.resolve()
     index_path = args.index.resolve()
     output_path = args.output.resolve()
+    emphasis_output_path = args.emphasis_output.resolve()
     original_hash_before = sha256(original_path)
     index_hash_before = sha256(index_path)
 
@@ -68,6 +72,7 @@ def main() -> None:
                 titles[(volume, number)] = title
 
     songs = []
+    emphasis_ranges = []
     for volume, start, end in volume_body_ranges:
         markers = []
         for paragraph_index in range(start, end):
@@ -105,6 +110,24 @@ def main() -> None:
                 if not lyric_blocks and not category and paragraph.alignment == 2 and len(line) <= 50:
                     category = line
                     continue
+
+                # Preserve the original Word emphasis exactly as character ranges.
+                # This compact sidecar avoids duplicating the complete song catalogue.
+                bold_spans = []
+                run_offset = 0
+                run_text = []
+                for run in paragraph.runs:
+                    if not run.text:
+                        continue
+                    run_text.append(run.text)
+                    run_end = run_offset + len(run.text)
+                    if run.bold is True:
+                        bold_spans.append([run_offset, run_end])
+                    run_offset = run_end
+                if "".join(run_text) != line:
+                    # Do not apply offsets if non-run XML content changed the text stream.
+                    bold_spans = []
+                emphasis_ranges.append(bold_spans)
 
                 paragraph_format = paragraph.paragraph_format
                 def points(value):
@@ -160,6 +183,14 @@ def main() -> None:
     encoded_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     output_path.write_bytes(gzip.compress(encoded_json, compresslevel=9, mtime=0))
 
+    emphasis_output_path.parent.mkdir(parents=True, exist_ok=True)
+    encoded_emphasis = json.dumps(
+        emphasis_ranges, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    emphasis_output_path.write_bytes(
+        gzip.compress(encoded_emphasis, compresslevel=9, mtime=0)
+    )
+
     # Verify inputs are byte-identical after extraction (read-only guarantee).
     if sha256(original_path) != original_hash_before or sha256(index_path) != index_hash_before:
         raise RuntimeError("Input Word document changed during extraction")
@@ -172,6 +203,9 @@ def main() -> None:
         "catalogue_gzip_bytes": output_path.stat().st_size,
         "catalogue_json_bytes": len(encoded_json),
         "output": str(output_path),
+        "lyric_blocks_with_bold_ranges": sum(bool(ranges) for ranges in emphasis_ranges),
+        "emphasis_gzip_bytes": emphasis_output_path.stat().st_size,
+        "emphasis_output": str(emphasis_output_path),
     }, ensure_ascii=False, indent=2))
 
 
