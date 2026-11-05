@@ -6,6 +6,7 @@ import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import com.k2fsa.sherpa.onnx.FeatureConfig;
 import com.k2fsa.sherpa.onnx.OnlineModelConfig;
@@ -71,7 +72,8 @@ final class OfflineBengaliVoice {
     }
 
     private void runRecognition(){
-        OnlineRecognizer recognizer=null;OnlineStream stream=null;AudioRecord audio=null;boolean delivered=false;
+        OnlineRecognizer recognizer=null;OnlineStream stream=null;AudioRecord audio=null;
+        StringBuilder completedText=new StringBuilder();String latestText="";
         try{
             if(cancelled||stopRequested)return;
             status("বাংলা অফলাইন মডেল চালু হচ্ছে…");
@@ -85,7 +87,18 @@ final class OfflineBengaliVoice {
             model.setNumThreads(Math.max(1,Math.min(2,Runtime.getRuntime().availableProcessors())));
             model.setDebug(false);model.setProvider("cpu");model.setModelType("zipformer2");
             OnlineRecognizerConfig config=new OnlineRecognizerConfig();
-            config.setFeatConfig(feature);config.setModelConfig(model);config.setEnableEndpoint(true);
+            config.setFeatConfig(feature);config.setModelConfig(model);
+
+            // Do not treat startup silence as the end of a user's utterance.
+            // Rule 1 in sherpa-onnx defaults to 2.4 seconds of silence even
+            // when no speech has been detected.
+            EndpointConfig endpoints=new EndpointConfig();
+            endpoints.setRule1(new EndpointRule(true,2.4f,0.0f));
+            endpoints.setRule2(new EndpointRule(true,1.2f,0.0f));
+            endpoints.setRule3(new EndpointRule(false,0.0f,20.0f));
+            config.setEndpointConfig(endpoints);
+            config.setEnableEndpoint(true);
+
             recognizer=new OnlineRecognizer(context.getAssets(),config);stream=recognizer.createStream("");
 
             AudioInput input=createAudioInput();
@@ -98,32 +111,62 @@ final class OfflineBengaliVoice {
             if(audio.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING)
                 throw new IllegalStateException("মাইক্রোফোন রেকর্ডিং শুরু করতে পারেনি।");
             status("শুনছি… বাংলায় গানের নাম বা লাইন বলুন।");
-            short[] buffer=new short[Math.max(1600,input.sampleRate/10)];String latestText="";
+            short[] buffer=new short[Math.max(1600,input.sampleRate/10)];
+
             while(!stopRequested&&!cancelled){
                 int count=audio.read(buffer,0,buffer.length);
-                if(count<0){if(stopRequested||cancelled)break;throw new IllegalStateException("মাইক্রোফোন থেকে অডিও পাওয়া যাচ্ছে না ("+count+")।");}
+                if(count<0){
+                    if(stopRequested||cancelled)break;
+                    throw new IllegalStateException("মাইক্রোফোন থেকে অডিও পাওয়া যাচ্ছে না ("+count+")।");
+                }
                 if(count==0)continue;
-                float[] samples=toModelSamples(buffer,count,input.sampleRate);if(samples.length==0)continue;
-                stream.acceptWaveform(samples,MODEL_RATE);while(recognizer.isReady(stream))recognizer.decode(stream);
+                float[] samples=toModelSamples(buffer,count,input.sampleRate);
+                if(samples.length==0)continue;
+                stream.acceptWaveform(samples,MODEL_RATE);
+                while(recognizer.isReady(stream))recognizer.decode(stream);
+
                 OnlineRecognizerResult result=recognizer.getResult(stream);
-                if(result!=null&&result.getText()!=null){latestText=result.getText().trim();if(!latestText.isEmpty())partial(latestText);}
+                latestText=result==null||result.getText()==null?"":result.getText().trim();
+                String preview=joinTranscript(completedText.toString(),latestText);
+                if(!preview.isEmpty())partial(preview);
+
+                // Endpoint marks a phrase boundary, not the end of the entire
+                // voice-search session. Preserve the phrase, reset this stream,
+                // and keep listening for the next phrase or the user's Finish tap.
                 if(recognizer.isEndpoint(stream)){
                     OnlineRecognizerResult finalResult=recognizer.getResult(stream);
-                    String phrase=finalResult==null?latestText:finalResult.getText().trim();
-                    if(!phrase.isEmpty()&&!cancelled){String finalPhrase=phrase;main.post(()->{if(!cancelled)listener.onResult(finalPhrase);});delivered=true;}
-                    break;
+                    String phrase=finalResult==null||finalResult.getText()==null
+                            ?latestText:finalResult.getText().trim();
+                    if(!phrase.isEmpty()){
+                        if(completedText.length()>0)completedText.append(' ');
+                        completedText.append(phrase);
+                    }
+                    latestText="";
+                    recognizer.reset(stream);
+                    if(completedText.length()>0)partial(completedText.toString());
                 }
             }
-            if(stopRequested&&!cancelled&&!delivered){
-                stream.inputFinished();while(recognizer.isReady(stream))recognizer.decode(stream);
+
+            if(stopRequested&&!cancelled){
+                stream.inputFinished();
+                while(recognizer.isReady(stream))recognizer.decode(stream);
                 OnlineRecognizerResult finalResult=recognizer.getResult(stream);
-                String phrase=finalResult==null?latestText:finalResult.getText().trim();
-                if(!phrase.isEmpty()){String finalPhrase=phrase;main.post(()->{if(!cancelled)listener.onResult(finalPhrase);});delivered=true;}
+                latestText=finalResult==null||finalResult.getText()==null
+                        ?"":finalResult.getText().trim();
+                String phrase=joinTranscript(completedText.toString(),latestText);
+                if(!phrase.isEmpty()){
+                    String finalPhrase=phrase;
+                    main.post(()->{if(!cancelled)listener.onResult(finalPhrase);});
+                }else{
+                    fail("কোনো কথা শনাক্ত হয়নি। আবার বলুন অথবা লিখে গান খুঁজুন।");
+                }
             }
-            if(!cancelled&&!delivered&&stopRequested)fail("কোনো কথা শনাক্ত হয়নি। আবার বলুন অথবা লিখে খুঁজুন।");
         }catch(Throwable error){
+            Log.e("AshkeShadekVoice","Offline Bengali recognition failed",error);
             String message=error.getMessage();
-            fail(message==null||message.trim().isEmpty()?"অফলাইন ভয়েস সার্চ চালু করা যায়নি। লিখে গান খুঁজুন।":"ভয়েস সার্চ: "+message);
+            fail(message==null||message.trim().isEmpty()
+                    ?"অফলাইন ভয়েস সার্চ চালু করা যায়নি। লিখে গান খুঁজুন।"
+                    :"ভয়েস সার্চ: "+message);
         }finally{
             recorder=null;
             if(audio!=null){
@@ -133,5 +176,13 @@ final class OfflineBengaliVoice {
             if(stream!=null)try{stream.release();}catch(Exception ignored){}
             if(recognizer!=null)try{recognizer.release();}catch(Exception ignored){}
         }
+    }
+
+    private static String joinTranscript(String first,String second){
+        String a=first==null?"":first.trim();
+        String b=second==null?"":second.trim();
+        if(a.isEmpty())return b;
+        if(b.isEmpty())return a;
+        return a+" "+b;
     }
 }
