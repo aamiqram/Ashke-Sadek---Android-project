@@ -4,11 +4,16 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.SharedPreferences;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Debug;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.ResultReceiver;
 import android.text.Editable;
 import android.text.Layout;
 import android.text.SpannableString;
@@ -80,7 +85,8 @@ public class MainActivity extends Activity {
     private ScrollView readerScroll;
     private EditText activeSearch;
     private EditText pendingVoiceTarget = null;
-    private OfflineBengaliVoice offlineVoice;
+    private ResultReceiver voiceReceiver;
+    private boolean voiceServiceStarted;
     private AlertDialog voiceDialog;
     private TextView voiceStatus;
     private boolean voiceSessionCompleted = false;
@@ -120,37 +126,38 @@ public class MainActivity extends Activity {
             JSONArray array = data.getJSONArray("songs");
             for (int i = 0; i < array.length(); i++) {
                 JSONObject item = array.getJSONObject(i);
+                String lyrics = item.optString("lyrics", "");
                 List<LyricBlock> blocks = new ArrayList<>();
                 JSONArray blockArray = item.optJSONArray("lyricBlocks");
+                int lyricCursor = 0;
                 if (blockArray != null) {
                     for (int blockIndex = 0; blockIndex < blockArray.length(); blockIndex++) {
                         JSONObject block = blockArray.getJSONObject(blockIndex);
+                        String paragraphText = block.optString("text", "");
+                        int paragraphStart = lyrics.indexOf(paragraphText, lyricCursor);
+                        if (paragraphStart < 0) {
+                            throw new IllegalStateException("Lyric paragraph offset mismatch in "
+                                    + item.optString("id", "unknown song"));
+                        }
+                        int paragraphEnd = paragraphStart + paragraphText.length();
                         blocks.add(new LyricBlock(
-                                block.optString("text", ""), block.optInt("alignment", 0),
+                                paragraphStart, paragraphEnd, block.optInt("alignment", 0),
                                 (float) block.optDouble("leftIndentPt", 0),
                                 (float) block.optDouble("firstLineIndentPt", 0),
                                 (float) block.optDouble("rightIndentPt", 0),
                                 (float) block.optDouble("spaceBeforePt", 0),
                                 (float) block.optDouble("spaceAfterPt", 0)
                         ));
+                        lyricCursor = paragraphEnd;
+                        if (lyricCursor < lyrics.length() && lyrics.charAt(lyricCursor) == '\n') {
+                            lyricCursor++;
+                        }
                     }
                 }
                 Song song = new Song(
                         item.getString("id"), item.getInt("volume"), item.getInt("number"),
-                        item.getString("title"), item.optString("lyrics", ""), item.optString("firstLine", ""),
-                        item.optString("category", ""), blocks
+                        item.getString("title"), lyrics, item.optString("category", ""), blocks
                 );
-                String corpus = song.title + " " + song.firstLine + " " + song.lyrics;
-                String modernCorpus = modernizeOldBengali(corpus);
-                song.searchableText = normalize(corpus);
-                song.searchableModernText = normalize(modernCorpus);
-                song.searchablePhoneticText = phoneticNormalize(corpus + " " + modernCorpus);
-                Set<String> originalWords = searchWords(corpus);
-                Set<String> modernWords = searchWords(modernCorpus);
-                song.searchableWords.addAll(originalWords);
-                song.searchableModernWords.addAll(modernWords);
-                for (String word : originalWords) song.searchablePhoneticWords.add(phoneticNormalize(word));
-                for (String word : modernWords) song.searchablePhoneticWords.add(phoneticNormalize(word));
                 songs.add(song);
             }
         } catch (Exception e) {
@@ -187,7 +194,8 @@ public class MainActivity extends Activity {
                         JSONArray span = spans.getJSONArray(i);
                         int start = span.getInt(0);
                         int end = span.getInt(1);
-                        if (start >= 0 && end > start && end <= block.text.length()) {
+                        if (start >= 0 && end > start && end <= block.length()) {
+                            if (block.boldSpans == null) block.boldSpans = new ArrayList<>();
                             block.boldSpans.add(new int[]{start, end});
                         }
                     }
@@ -437,25 +445,37 @@ public class MainActivity extends Activity {
     private int scoreSongMatch(Song song, String query) {
         String compact = normalize(query);
         if (compact.isEmpty()) return 0;
-        if (song.searchableText.contains(compact)) return 1000 + compact.length();
-        if (song.searchableModernText.contains(compact)) return 850 + compact.length();
+        // Build only the current song's transient search representation.
+        // No duplicate normalized/phonetic corpus or token sets are retained on every Song.
+        String corpus = song.title + " " + song.lyrics;
+        String originalCorpus = normalize(corpus);
+        if (originalCorpus.contains(compact)) return 1000 + compact.length();
+        String modernSource = modernizeOldBengali(corpus);
+        String modernCorpus = normalize(modernSource);
+        if (modernCorpus.contains(compact)) return 850 + compact.length();
+        String phoneticCorpus = phoneticNormalize(corpus);
         String phonetic = phoneticNormalize(query);
-        if (phonetic.length() >= 3 && song.searchablePhoneticText.contains(phonetic))
+        if (phonetic.length() >= 3 && phoneticCorpus.contains(phonetic))
             return 700 + phonetic.length();
 
         List<String> terms = new ArrayList<>(searchWords(query));
         if (terms.isEmpty()) return 0;
+        Set<String> originalWords = searchWords(corpus);
+        Set<String> modernWords = searchWords(modernSource);
+        Set<String> phoneticWords = new HashSet<>();
+        for (String word : originalWords) phoneticWords.add(phoneticNormalize(word));
+        for (String word : modernWords) phoneticWords.add(phoneticNormalize(word));
         int exact = 0, modern = 0, phoneticHits = 0, fuzzy = 0;
         for (String token : terms) {
             if (token.length() < 2) continue;
             String modernToken = normalize(modernizeOldBengali(token));
             String soundToken = phoneticNormalize(token);
-            if (song.searchableWords.contains(token)) exact++;
-            else if (song.searchableModernWords.contains(token)
-                    || song.searchableWords.contains(modernToken)
-                    || song.searchableModernWords.contains(modernToken)) modern++;
-            else if (song.searchablePhoneticWords.contains(soundToken)) phoneticHits++;
-            else if (token.length() >= 4 && hasOneEditMatch(token, song.searchableWords)) fuzzy++;
+            if (originalWords.contains(token)) exact++;
+            else if (modernWords.contains(token)
+                    || originalWords.contains(modernToken)
+                    || modernWords.contains(modernToken)) modern++;
+            else if (phoneticWords.contains(soundToken)) phoneticHits++;
+            else if (token.length() >= 4 && hasOneEditMatch(token, originalWords)) fuzzy++;
         }
         int matched = exact + modern + phoneticHits + fuzzy;
         int usableTerms = 0;
@@ -533,7 +553,7 @@ public class MainActivity extends Activity {
             LinearLayout item=cardRow();
             LinearLayout left=new LinearLayout(this);left.setOrientation(LinearLayout.VERTICAL);
             left.addView(label(song.title,15,TEXT,true));
-            TextView snippet = label(song.firstLine, 12, MUTED, false);
+            TextView snippet = label(song.firstLine(), 12, MUTED, false);
             snippet.setMaxLines(2);
             snippet.setEllipsize(android.text.TextUtils.TruncateAt.END);
             left.addView(snippet);
@@ -625,7 +645,8 @@ public class MainActivity extends Activity {
 
         int lyricSizeSp = screenWidthDp < 360f ? 17 : (screenWidthDp < 600f ? 18 : 20);
         for (LyricBlock block : song.lyricBlocks) {
-            TextView lyricLine = label(block.text, lyricSizeSp, TEXT, false);
+            String blockText = song.lyrics.substring(block.startOffset, block.endOffset);
+            TextView lyricLine = label(blockText, lyricSizeSp, TEXT, false);
             int gravity = block.alignment == 1 ? Gravity.CENTER_HORIZONTAL
                     : block.alignment == 2 ? Gravity.RIGHT : Gravity.LEFT;
             lyricLine.setGravity(gravity);
@@ -641,9 +662,10 @@ public class MainActivity extends Activity {
             int leftIndent = responsiveWordMeasure(block.leftIndentPt, textMeasure, wordTextWidthPt);
             int firstIndent = Math.max(0, leftIndent + responsiveWordMeasure(
                     block.firstLineIndentPt, textMeasure, wordTextWidthPt));
-            if (!block.boldSpans.isEmpty() || leftIndent > 0 || firstIndent > 0) {
-                SpannableString styled = new SpannableString(block.text);
-                for (int[] span : block.boldSpans) {
+            if ((block.boldSpans != null && !block.boldSpans.isEmpty())
+                    || leftIndent > 0 || firstIndent > 0) {
+                SpannableString styled = new SpannableString(blockText);
+                if (block.boldSpans != null) for (int[] span : block.boldSpans) {
                     int start = Math.max(0, Math.min(span[0], styled.length()));
                     int end = Math.max(start, Math.min(span[1], styled.length()));
                     if (end > start) styled.setSpan(new StyleSpan(Typeface.BOLD), start, end,
@@ -1025,36 +1047,54 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void logMemory(String phase) {
+        Debug.MemoryInfo memoryInfo = new Debug.MemoryInfo();
+        Debug.getMemoryInfo(memoryInfo);
+        Runtime runtime = Runtime.getRuntime();
+        Log.i("AshkeMemory", phase
+                + " pssKb=" + memoryInfo.getTotalPss()
+                + " javaHeapUsedKb=" + ((runtime.totalMemory() - runtime.freeMemory()) / 1024L)
+                + " nativeHeapAllocatedKb=" + (Debug.getNativeHeapAllocatedSize() / 1024L));
+    }
+
     @Override public void onTrimMemory(int level) {
         super.onTrimMemory(level);
+        logMemory("trim-level-" + level);
+        if (level >= TRIM_MEMORY_UI_HIDDEN && voiceServiceStarted) cancelVoiceSession();
         if (level >= TRIM_MEMORY_RUNNING_LOW) deleteDirectoryContents(getCacheDir());
+    }
+
+    @Override protected void onStop() {
+        if (voiceServiceStarted) cancelVoiceSession();
+        super.onStop();
     }
 
     @Override protected void onDestroy(){cancelVoiceSession();super.onDestroy();}
 
     private static class Song {
-        final String id; final int volume; final int number; final String title; final String lyrics; final String firstLine;
+        final String id; final int volume; final int number; final String title; final String lyrics;
         final String category; final List<LyricBlock> lyricBlocks;
-        String searchableText = "";
-        String searchableModernText = "";
-        String searchablePhoneticText = "";
-        final Set<String> searchableWords = new HashSet<>();
-        final Set<String> searchableModernWords = new HashSet<>();
-        final Set<String> searchablePhoneticWords = new HashSet<>();
-        Song(String id,int volume,int number,String title,String lyrics,String firstLine,String category,List<LyricBlock> lyricBlocks){
-            this.id=id; this.volume=volume; this.number=number; this.title=title; this.lyrics=lyrics; this.firstLine=firstLine;
+        Song(String id,int volume,int number,String title,String lyrics,String category,List<LyricBlock> lyricBlocks){
+            this.id=id; this.volume=volume; this.number=number; this.title=title; this.lyrics=lyrics;
             this.category=category; this.lyricBlocks=lyricBlocks;
+        }
+        String firstLine() {
+            int lineEnd = lyrics.indexOf('\n');
+            return lineEnd < 0 ? lyrics : lyrics.substring(0, lineEnd);
         }
     }
 
     private static class LyricBlock {
-        final String text; final int alignment;
+        final int startOffset; final int endOffset; final int alignment;
         final float leftIndentPt; final float firstLineIndentPt; final float rightIndentPt;
         final float spaceBeforePt; final float spaceAfterPt;
-        final List<int[]> boldSpans = new ArrayList<>();
-        LyricBlock(String text,int alignment,float leftIndentPt,float firstLineIndentPt,float rightIndentPt,float spaceBeforePt,float spaceAfterPt){
-            this.text=text; this.alignment=alignment; this.leftIndentPt=leftIndentPt; this.firstLineIndentPt=firstLineIndentPt;
+        List<int[]> boldSpans;
+        LyricBlock(int startOffset,int endOffset,int alignment,float leftIndentPt,float firstLineIndentPt,
+                   float rightIndentPt,float spaceBeforePt,float spaceAfterPt){
+            this.startOffset=startOffset; this.endOffset=endOffset; this.alignment=alignment;
+            this.leftIndentPt=leftIndentPt; this.firstLineIndentPt=firstLineIndentPt;
             this.rightIndentPt=rightIndentPt; this.spaceBeforePt=spaceBeforePt; this.spaceAfterPt=spaceAfterPt;
         }
+        int length() { return endOffset - startOffset; }
     }
 }

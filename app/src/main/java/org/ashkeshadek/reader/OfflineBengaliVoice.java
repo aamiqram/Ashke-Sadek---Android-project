@@ -17,13 +17,17 @@ import com.k2fsa.sherpa.onnx.OnlineStream;
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig;
 
 final class OfflineBengaliVoice {
-    interface Listener { void onStatus(String message); void onPartial(String text); void onResult(String text); void onError(String message); }
+    interface Listener {
+        void onStatus(String message);
+        void onPartial(String text);
+        void onResult(String text);
+        void onError(String message);
+        void onFinished();
+    }
     private static final int MODEL_RATE=16000;
     private static final int[] CAPTURE_RATES={16000,48000,44100};
     private static final String MODEL_DIR="sherpa-onnx-bn-vosk-int8-19d0fc5";
-    private static final Object RECOGNIZER_LOCK = new Object();
     private static final Object SESSION_LOCK = new Object();
-    private static volatile OnlineRecognizer cachedRecognizer;
     private final Context context;
     private final Listener listener;
     private final Handler main=new Handler(Looper.getMainLooper());
@@ -94,7 +98,8 @@ final class OfflineBengaliVoice {
             transducer.setJoiner(MODEL_DIR+"/joiner.int8.onnx");
             OnlineModelConfig model=new OnlineModelConfig();
             model.setTransducer(transducer);model.setTokens(MODEL_DIR+"/tokens.txt");
-            model.setNumThreads(Math.max(1,Math.min(2,Runtime.getRuntime().availableProcessors())));
+            // Keep the native inference working set and worker stack count small on low-RAM phones.
+            model.setNumThreads(1);
             model.setDebug(false);model.setProvider("cpu");model.setModelType("zipformer2");
             OnlineRecognizerConfig config=new OnlineRecognizerConfig();
             config.setFeatConfig(feature);config.setModelConfig(model);
@@ -104,12 +109,10 @@ final class OfflineBengaliVoice {
             // the capture loop below resets the stream and continues listening.
             config.setEnableEndpoint(true);
 
-            synchronized (RECOGNIZER_LOCK) {
-                if (cachedRecognizer == null) {
-                    cachedRecognizer = new OnlineRecognizer(context.getAssets(), config);
-                }
-                recognizer = cachedRecognizer;
-            }
+            // This recognizer lives only for the active voice-search session.
+            // The dedicated service process is terminated after cleanup to return
+            // native ONNX allocations to the operating system.
+            recognizer=new OnlineRecognizer(context.getAssets(),config);
             stream=recognizer.createStream("");
 
             status("প্রস্তুত। শুরু করুন চাপুন, তারপর শুধু গানের লাইনটি বলুন।");
@@ -191,6 +194,8 @@ final class OfflineBengaliVoice {
                 try{audio.release();}catch(Exception ignored){}
             }
             if(stream!=null)try{stream.release();}catch(Exception ignored){}
+            if(recognizer!=null)try{recognizer.release();}catch(Exception ignored){}
+            main.post(listener::onFinished);
         }
     }
 

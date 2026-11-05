@@ -9,6 +9,8 @@
         android:supportsRtl="true" android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">
         <receiver android:name=".UpdateInstallReceiver" android:exported="false" />
+        <service android:name=".VoiceRecognitionService"
+            android:process=":voice" android:exported="false" android:stopWithTask="true" />
         <activity android:name=".MainActivity" android:exported="true"
             android:screenOrientation="unspecified" android:windowSoftInputMode="adjustResize">
             <intent-filter>
