@@ -44,11 +44,14 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -74,6 +77,9 @@ public class MainActivity extends Activity {
     private static final int SONG_BATCH_SIZE = 60;
     private static final String PREFS = "ashke_shadek_local";
     private static final int MIC_PERMISSION = 410;
+    private static final int REQUEST_EXPORT_USER_DATA = 512;
+    private static final int REQUEST_IMPORT_USER_DATA = 513;
+    private static final String USER_DATA_BACKUP_FORMAT = "ashke-shadek-user-data";
     private static final Pattern WORD_PATTERN =
             Pattern.compile("[\\p{L}\\p{M}\\p{N}]+");
     private static final Pattern NORMALIZE_SEPARATOR_PATTERN =
@@ -407,6 +413,192 @@ public class MainActivity extends Activity {
         updateCard.addView(label("›", 24, GREEN, true));
         updateCard.setOnClickListener(v -> checkForAppUpdates(true));
         body.addView(updateCard, matchWrap());
+
+        addSpace(body, 8);
+        LinearLayout backupCard = cardRow();
+        backupCard.addView(label("⇄", 23, GREEN, true),
+                new LinearLayout.LayoutParams(dp(42), dp(42)));
+        LinearLayout backupInfo = new LinearLayout(this);
+        backupInfo.setOrientation(LinearLayout.VERTICAL);
+        backupInfo.addView(label("ডেটা ব্যাকআপ ও পুনরুদ্ধার", 14, TEXT, true));
+        backupInfo.addView(label("প্রিয় গান, বুকমার্ক ও পড়ার অবস্থান", 11, MUTED, false));
+        backupCard.addView(backupInfo, new LinearLayout.LayoutParams(0, -2, 1f));
+        backupCard.addView(label("›", 24, GREEN, true));
+        backupCard.setOnClickListener(v -> showUserDataBackupOptions());
+        body.addView(backupCard, matchWrap());
+    }
+
+    private void showUserDataBackupOptions() {
+        new AlertDialog.Builder(this)
+                .setTitle("ডেটা ব্যাকআপ ও পুনরুদ্ধার")
+                .setMessage("অ্যাপ বদলানো বা নতুন করে ইনস্টল করার আগে প্রিয় গান, বুকমার্ক, সাম্প্রতিক গান এবং পড়ার অবস্থান JSON ফাইলে সংরক্ষণ করুন।")
+                .setPositiveButton("ব্যাকআপ তৈরি", (d, which) -> requestUserDataExport())
+                .setNeutralButton("ব্যাকআপ পুনরুদ্ধার", (d, which) -> requestUserDataImport())
+                .setNegativeButton("বন্ধ", null)
+                .show();
+    }
+
+    private void requestUserDataExport() {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/json");
+        intent.putExtra(Intent.EXTRA_TITLE, "Ashke-Shadek-User-Data-Backup.json");
+        try {
+            startActivityForResult(intent, REQUEST_EXPORT_USER_DATA);
+        } catch (Exception error) {
+            Toast.makeText(this, "ফাইল সংরক্ষণের জায়গা খোলা যায়নি।", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void requestUserDataImport() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/json");
+        try {
+            startActivityForResult(intent, REQUEST_IMPORT_USER_DATA);
+        } catch (Exception error) {
+            Toast.makeText(this, "ব্যাকআপ ফাইল বেছে নেওয়া যায়নি।", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private JSONObject createUserDataBackup() throws Exception {
+        JSONObject backup = new JSONObject();
+        backup.put("format", USER_DATA_BACKUP_FORMAT);
+        backup.put("schemaVersion", 1);
+        backup.put("packageName", getPackageName());
+
+        JSONArray favoriteIds = new JSONArray();
+        for (String id : favorites) favoriteIds.put(id);
+        backup.put("favorites", favoriteIds);
+
+        JSONArray bookmarkIds = new JSONArray();
+        for (String id : bookmarks) bookmarkIds.put(id);
+        backup.put("bookmarks", bookmarkIds);
+
+        JSONArray recent = new JSONArray();
+        for (String id : recentIds) recent.put(id);
+        backup.put("recent", recent);
+        backup.put("lastSongId", lastSongId == null ? "" : lastSongId);
+
+        JSONObject scrollPositions = new JSONObject();
+        for (Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
+            String key = entry.getKey();
+            Object value = entry.getValue();
+            if (!key.startsWith("scroll_") || !(value instanceof Number)) continue;
+            String songId = key.substring("scroll_".length());
+            if (byId(songId) == null) continue;
+            long position = ((Number) value).longValue();
+            if (position >= 0 && position <= 5_000_000L) {
+                scrollPositions.put(songId, position);
+            }
+        }
+        backup.put("scrollPositions", scrollPositions);
+        return backup;
+    }
+
+    private Set<String> validBackupSongIds(JSONArray ids) {
+        Set<String> valid = new LinkedHashSet<>();
+        if (ids == null) return valid;
+        for (int i = 0; i < ids.length() && valid.size() < songs.size(); i++) {
+            String id = ids.optString(i, "");
+            if (byId(id) != null) valid.add(id);
+        }
+        return valid;
+    }
+
+    private List<String> validBackupRecent(JSONArray ids) {
+        List<String> valid = new ArrayList<>();
+        if (ids == null) return valid;
+        for (int i = 0; i < ids.length() && valid.size() < 12; i++) {
+            String id = ids.optString(i, "");
+            if (byId(id) != null && !valid.contains(id)) valid.add(id);
+        }
+        return valid;
+    }
+
+    private void writeUserDataBackup(Uri destination) throws Exception {
+        JSONObject backup = createUserDataBackup();
+        try (OutputStream output = getContentResolver().openOutputStream(destination, "w")) {
+            if (output == null) throw new IllegalStateException("ব্যাকআপ ফাইল খোলা যায়নি।");
+            output.write(backup.toString(2).getBytes("UTF-8"));
+            output.flush();
+        }
+    }
+
+    private void restoreUserDataBackup(Uri source) throws Exception {
+        JSONObject backup;
+        try (InputStream input = getContentResolver().openInputStream(source);
+             ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+            if (input == null) throw new IllegalStateException("ব্যাকআপ ফাইল খোলা যায়নি।");
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                if (bytes.size() + count > 256 * 1024) {
+                    throw new IllegalStateException("ব্যাকআপ ফাইলটি অস্বাভাবিক বড়।");
+                }
+                bytes.write(buffer, 0, count);
+            }
+            backup = new JSONObject(bytes.toString("UTF-8"));
+        }
+
+        if (!USER_DATA_BACKUP_FORMAT.equals(backup.optString("format"))
+                || backup.optInt("schemaVersion", -1) != 1
+                || !getPackageName().equals(backup.optString("packageName"))) {
+            throw new IllegalArgumentException("এটি এশকে ছাদেকের সমর্থিত ব্যাকআপ ফাইল নয়।");
+        }
+
+        Set<String> importedFavorites = validBackupSongIds(backup.optJSONArray("favorites"));
+        Set<String> importedBookmarks = validBackupSongIds(backup.optJSONArray("bookmarks"));
+        List<String> importedRecent = validBackupRecent(backup.optJSONArray("recent"));
+        String importedLast = backup.optString("lastSongId", "");
+        if (byId(importedLast) == null) importedLast = "";
+
+        SharedPreferences.Editor editor = prefs.edit();
+        editor.putStringSet("favorites", new HashSet<>(importedFavorites));
+        editor.putStringSet("bookmarks", new HashSet<>(importedBookmarks));
+        editor.putString("last_song", importedLast);
+        editor.putString("recent", joinRecent(importedRecent));
+
+        JSONObject scroll = backup.optJSONObject("scrollPositions");
+        if (scroll != null) {
+            Iterator<String> keys = scroll.keys();
+            while (keys.hasNext()) {
+                String songId = keys.next();
+                if (byId(songId) == null) continue;
+                long position = scroll.optLong(songId, -1L);
+                if (position >= 0 && position <= 5_000_000L) {
+                    editor.putInt("scroll_" + songId, (int) position);
+                }
+            }
+        }
+        editor.apply();
+
+        favorites = new LinkedHashSet<>(importedFavorites);
+        bookmarks = new LinkedHashSet<>(importedBookmarks);
+        recentIds = importedRecent;
+        lastSongId = importedLast;
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
+        try {
+            if (requestCode == REQUEST_EXPORT_USER_DATA) {
+                writeUserDataBackup(uri);
+                Toast.makeText(this, "আপনার ডেটার ব্যাকআপ সংরক্ষণ করা হয়েছে।",
+                        Toast.LENGTH_LONG).show();
+            } else if (requestCode == REQUEST_IMPORT_USER_DATA) {
+                restoreUserDataBackup(uri);
+                Toast.makeText(this, "প্রিয় গান, বুকমার্ক ও পড়ার অবস্থান পুনরুদ্ধার হয়েছে।",
+                        Toast.LENGTH_LONG).show();
+                renderHome();
+            }
+        } catch (Exception error) {
+            String message = error.getMessage();
+            Toast.makeText(this, message == null ? "ব্যাকআপ প্রক্রিয়া সম্পন্ন হয়নি।" : message,
+                    Toast.LENGTH_LONG).show();
+        }
     }
 
     private void checkForAppUpdates(boolean userInitiated) {
@@ -455,6 +647,7 @@ public class MainActivity extends Activity {
                 .setNegativeButton("পরে", (d, which) ->
                         prefs.edit().putLong("dismissed_update_version", update.versionCode).apply());
         if (update.requiresMigration) {
+            builder.setNeutralButton("ডেটা ব্যাকআপ", (d, which) -> requestUserDataExport());
             builder.setPositiveButton("রিলিজ পেজ খুলুন", (d, which) -> openUpdateReleasePage(update));
         } else {
             builder.setPositiveButton("ডাউনলোড ও ইনস্টল", (d, which) ->
