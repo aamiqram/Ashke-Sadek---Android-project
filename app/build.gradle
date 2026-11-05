@@ -72,7 +72,17 @@ tasks.register('prepareOfflineVoiceAssets') {
         if(!(new File(modelSource,'encoder.onnx').exists()&&new File(modelSource,'decoder.onnx').exists()
                 &&new File(modelSource,'joiner.onnx').exists()&&new File(modelSource,'tokens.txt').exists())){
             project.delete(extractionRoot);extractionRoot.mkdirs()
-            exec{commandLine 'tar','-xjf',archive.absolutePath,'-C',extractionRoot.absolutePath}
+            // Gradle 9 removed the task-level exec helper; invoke the system tar directly.
+            def tarProcess = new ProcessBuilder(
+                    'tar', '-xjf', archive.absolutePath, '-C', extractionRoot.absolutePath)
+                    .redirectErrorStream(true)
+                    .start()
+            String tarOutput = tarProcess.inputStream.getText('UTF-8')
+            int tarExit = tarProcess.waitFor()
+            if (tarExit != 0) {
+                throw new GradleException(
+                        "Could not extract the Bengali model archive (tar exit ${tarExit}): ${tarOutput}")
+            }
         }
         ['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].each{fileName->
             File source=new File(modelSource,fileName)
