@@ -83,6 +83,8 @@ public class MainActivity extends Activity {
     private SpeechRecognizer speechRecognizer;
     private EditText pendingVoiceTarget = null;
     private boolean voiceAvailable = false;
+    private String voiceLang = "bn-BD";
+    private boolean voiceRetried = false;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -96,7 +98,7 @@ public class MainActivity extends Activity {
         volumeNames.add("প্রথম খণ্ড");
         volumeNames.add("দ্বিতীয় খণ্ড");
         volumeNames.add("তৃতীয় খণ্ড");
-        voiceAvailable = Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this);
+        voiceAvailable = SpeechRecognizer.isRecognitionAvailable(this);
         getWindow().setStatusBarColor(Build.VERSION.SDK_INT >= 23 ? BG : GREEN_DARK);
         getWindow().setNavigationBarColor(Build.VERSION.SDK_INT >= 26 ? BG : GREEN_DARK);
         int lightSystemBars = 0;
@@ -107,12 +109,13 @@ public class MainActivity extends Activity {
     }
 
     private void loadCatalog() {
-        try (InputStream raw = getAssets().open("songs.json.gz");
-             InputStream in = new GZIPInputStream(raw);
+        try (InputStream input = openCatalog();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            InputStream in = input;
             byte[] buffer = new byte[8192];
             int count;
             while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+            in.close();
             JSONObject data = new JSONObject(out.toString("UTF-8"));
             JSONArray array = data.getJSONArray("songs");
             for (int i = 0; i < array.length(); i++) {
@@ -142,6 +145,15 @@ public class MainActivity extends Activity {
             }
         } catch (Exception e) {
             Toast.makeText(this, "গানের তালিকা খোলা যায়নি। অ্যাপটি পুনরায় ইনস্টল করুন।", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** Gradle unzips .gz assets, so the packaged file is songs.json — accept both. */
+    private InputStream openCatalog() throws Exception {
+        try {
+            return new GZIPInputStream(getAssets().open("songs.json.gz"));
+        } catch (Exception missingGz) {
+            return getAssets().open("songs.json");
         }
     }
 
@@ -219,13 +231,13 @@ public class MainActivity extends Activity {
                 addSpace(body, 18);
             }
         }
-        if (!recentIds.isEmpty()) {
+        List<Song> recentToShow = new ArrayList<>();
+        for (String rid : recentIds) { Song rs = byId(rid); if (rs == null || lastSongId.equals(rid)) continue; recentToShow.add(rs); if (recentToShow.size() >= 4) break; }
+        if (!recentToShow.isEmpty()) {
             body.addView(label("সম্প্রতি পড়া গান", 17, TEXT, true));
             addSpace(body, 8);
             int shown = 0;
-            for (String id : recentIds) {
-                Song recent = byId(id);
-                if (recent == null || (lastSongId.equals(id))) continue;
+            for (Song recent : recentToShow) {
                 LinearLayout recentCard = cardRow();
                 recentCard.addView(label(recent.title, 14, TEXT, true), new LinearLayout.LayoutParams(0,-2,1f));
                 recentCard.addView(label("›", 23, GREEN, true));
@@ -249,7 +261,7 @@ public class MainActivity extends Activity {
         TextView mic = actionButton("🎙", "ভয়েস");
         LinearLayout.LayoutParams micLp = new LinearLayout.LayoutParams(dp(66), dp(52)); micLp.leftMargin = dp(8);
         searchRow.addView(mic, micLp);
-        mic.setOnClickListener(v -> startOfflineVoice(search));
+        mic.setOnClickListener(v -> startVoice(search));
         body.addView(searchRow);
         LinearLayout results = new LinearLayout(this); results.setOrientation(LinearLayout.VERTICAL);
         body.addView(results);
@@ -304,7 +316,7 @@ public class MainActivity extends Activity {
     private void renderIndex() {
         currentScreen = "index";
         mount("গানের সূচী", "খণ্ড বেছে নিয়ে গান পড়ুন", false, true);
-        ScrollView scroll=pageScroll(); LinearLayout body=(LinearLayout)scroll.getChildAt(0); body.setPadding(dp(18),dp(6),dp(18),dp(20));
+        ScrollView scroll=pageScroll(); LinearLayout body=(LinearLayout)scroll.getChildAt(0); body.setPadding(dp(18),dp(6),dp(18),dp(72));
         EditText search=searchField("সব খণ্ডে গান খুঁজুন"); body.addView(search,matchHeight(52)); activeSearch=search; addSpace(body,10);
         LinearLayout results=new LinearLayout(this); results.setOrientation(LinearLayout.VERTICAL); body.addView(results);
         renderSearchResults(results,"",0);
@@ -315,7 +327,7 @@ public class MainActivity extends Activity {
         currentScreen = type;
         boolean isFav = type.equals("favorites");
         mount(isFav ? "প্রিয় গান" : "বুকমার্ক", isFav ? favorites.size()+"টি সংরক্ষিত গান" : bookmarks.size()+"টি বুকমার্ক", true, true);
-        ScrollView scroll=pageScroll(); LinearLayout body=(LinearLayout)scroll.getChildAt(0); body.setPadding(dp(18),dp(6),dp(18),dp(20));
+        ScrollView scroll=pageScroll(); LinearLayout body=(LinearLayout)scroll.getChildAt(0); body.setPadding(dp(18),dp(6),dp(18),dp(72));
         Set<String> ids=isFav?favorites:bookmarks;
         if(ids.isEmpty()) {
             TextView empty=label(isFav?"এখনো কোনো প্রিয় গান যোগ করা হয়নি।":"এখনো কোনো বুকমার্ক নেই।",15,MUTED,false);
@@ -400,6 +412,10 @@ public class MainActivity extends Activity {
     private void renderReader(Song song) {
         currentScreen="reader"; currentSong=song;
         mount("গান "+bn(song.number),volumeNames.get(song.volume-1),true,false);
+        TextView headerSearch = iconButton("⌕", 22);
+        headerSearch.setOnClickListener(v -> startVoice(null));
+        LinearLayout.LayoutParams hsLp = new LinearLayout.LayoutParams(dp(42), dp(42));
+        ((LinearLayout) root.getChildAt(0)).addView(headerSearch, hsLp);
         FrameLayout frame=new FrameLayout(this);
         page.addView(frame,new LinearLayout.LayoutParams(-1,0,1f));
         readerScroll=new ScrollView(this); readerScroll.setFillViewport(true); readerScroll.setClipToPadding(false);
@@ -430,14 +446,12 @@ public class MainActivity extends Activity {
         favorite.setOnClickListener(v->{toggleSet(favorites,song.id,"favorites");favorite.setText(favorites.contains(song.id)?"♥\nপ্রিয়":"♡\nপ্রিয়");favorite.setTextColor(favorites.contains(song.id)?GREEN:TEXT);});
         bookmark.setOnClickListener(v->{toggleSet(bookmarks,song.id,"bookmarks");bookmark.setText(bookmarks.contains(song.id)?"▣\nবুকমার্ক":"▢\nবুকমার্ক");bookmark.setTextColor(bookmarks.contains(song.id)?GREEN:TEXT);});
 
+        int lyricSize = fitLyricSize(song);
         for (LyricBlock block : song.lyricBlocks) {
-            TextView lyricLine = label(block.text, 20, TEXT, false);
+            TextView lyricLine = label(block.text, lyricSize, TEXT, false);
             int gravity = block.alignment == 1 ? Gravity.CENTER_HORIZONTAL
                     : block.alignment == 2 ? Gravity.RIGHT : Gravity.LEFT;
             lyricLine.setGravity(gravity);
-            if (block.alignment == 3 && Build.VERSION.SDK_INT >= 26) {
-                lyricLine.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD);
-            }
             lyricLine.setLineSpacing(dp(7), 1.16f);
             int leftIndent = pointsToPx(block.leftIndentPt);
             int firstIndent = Math.max(0, leftIndent + pointsToPx(block.firstLineIndentPt));
@@ -465,22 +479,21 @@ public class MainActivity extends Activity {
         prev.setOnClickListener(v->{if(pSong!=null)openSong(pSong);});nxt.setOnClickListener(v->{if(nSong!=null)openSong(nSong);});
         body.addView(nav);
 
-        LinearLayout floating = new LinearLayout(this);
-        floating.setOrientation(LinearLayout.VERTICAL);
-        floating.setGravity(Gravity.CENTER_HORIZONTAL);
-        TextView find = actionButton("⌕","গান খুঁজুন");
-        TextView toTop = actionButton("↑","উপরে যান");
-        floating.addView(find, new LinearLayout.LayoutParams(dp(72),dp(58)));
-        addSpace(floating,8);
-        floating.addView(toTop, new LinearLayout.LayoutParams(dp(72),dp(58)));
-        FrameLayout.LayoutParams floatingLp = new FrameLayout.LayoutParams(dp(80),-2,Gravity.BOTTOM|Gravity.END);
-        floatingLp.setMargins(0,0,dp(12),dp(16));
-        frame.addView(floating,floatingLp);
+        LinearLayout tools = new LinearLayout(this);
+        tools.setOrientation(LinearLayout.HORIZONTAL);
+        TextView find = navButton("⌕  গান খুঁজুন");
+        TextView toTop = navButton("↑  উপরে যান");
+        tools.addView(find, new LinearLayout.LayoutParams(0,dp(46),1f));
+        LinearLayout.LayoutParams topLp = new LinearLayout.LayoutParams(0,dp(46),1f);
+        topLp.leftMargin = dp(8);
+        tools.addView(toTop, topLp);
+        addSpace(body, 18);
+        body.addView(tools);
         find.setOnClickListener(v->{
-            if (voiceAvailable) startOfflineVoice(null);
+            if (voiceAvailable) startVoice(null);
             else {
                 renderIndex();
-                Toast.makeText(this,"এই ফোনে অফলাইন ভয়েস সার্চ নেই। এখানে লিখে গান খুঁজুন।",Toast.LENGTH_LONG).show();
+                Toast.makeText(this,"এই ফোনে ভয়েস সার্চ নেই। গানের নাম লিখে খুঁজুন।",Toast.LENGTH_LONG).show();
                 if(activeSearch!=null) activeSearch.requestFocus();
             }
         });
@@ -493,13 +506,35 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** One font size for the whole song so its longest line still fits on a single line. */
+    private int fitLyricSize(Song song) {
+        float available = getResources().getDisplayMetrics().widthPixels - dp(40);
+        android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        float best = 20f;
+        for (LyricBlock block : song.lyricBlocks) {
+            int indent = Math.max(0, pointsToPx(block.leftIndentPt))
+                    + Math.max(0, pointsToPx(block.firstLineIndentPt));
+            float width = available - indent - Math.max(0, pointsToPx(block.rightIndentPt));
+            if (width <= 0 || block.text.isEmpty()) continue;
+            paint.setTextSize(pxToSp(20f));
+            float needed = paint.measureText(block.text);
+            if (needed > width) best = Math.min(best, 20f * width / needed);
+        }
+        return Math.max(11, Math.min(20, (int) Math.floor(best)));
+    }
+
+    private float pxToSp(float sp) {
+        return android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, sp,
+                getResources().getDisplayMetrics());
+    }
+
     private void toggleSet(Set<String> set,String id,String key){
         if(set.contains(id))set.remove(id);else set.add(id);
         prefs.edit().putStringSet(key,new HashSet<>(set)).apply();
     }
 
-    private void startOfflineVoice(EditText target) {
-        if(Build.VERSION.SDK_INT<31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(this)){
+    private void startVoice(EditText target) {
+        if(!SpeechRecognizer.isRecognitionAvailable(this)){
             Toast.makeText(this,"এই ফোনে অফলাইন বাংলা ভয়েস সার্চ পাওয়া যাচ্ছে না। গানের নাম লিখে খুঁজুন।",Toast.LENGTH_LONG).show();
             if(target!=null){target.requestFocus();((InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(target,InputMethodManager.SHOW_IMPLICIT);}
             else {
@@ -517,7 +552,7 @@ public class MainActivity extends Activity {
         }
         try {
             if(speechRecognizer!=null){speechRecognizer.destroy();speechRecognizer=null;}
-            speechRecognizer=SpeechRecognizer.createOnDeviceSpeechRecognizer(this);
+            speechRecognizer=SpeechRecognizer.createSpeechRecognizer(this);
             speechRecognizer.setRecognitionListener(new RecognitionListener(){
                 @Override public void onReadyForSpeech(Bundle params){Toast.makeText(MainActivity.this,"বলুন, কোন গানটি খুঁজছেন…",Toast.LENGTH_SHORT).show();}
                 @Override public void onBeginningOfSpeech(){}
@@ -525,6 +560,9 @@ public class MainActivity extends Activity {
                 @Override public void onBufferReceived(byte[] buffer){}
                 @Override public void onEndOfSpeech(){}
                 @Override public void onError(int error){
+                    if (error == 12 && "bn-BD".equals(voiceLang) && !voiceRetried) {
+                        voiceRetried = true; voiceLang = "en-US"; destroyRecognizer(); startVoice(target); return;
+                    }
                     destroyRecognizer();
                     Toast.makeText(MainActivity.this,"কথাটি বোঝা যায়নি। লিখে গান খুঁজুন।",Toast.LENGTH_LONG).show();
                     if (target == null) renderIndex();
@@ -546,8 +584,8 @@ public class MainActivity extends Activity {
             });
             Intent intent=new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
             intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE,"bn-BD");
-            intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE,true);
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, voiceLang);
+            intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS,3);
             intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS,true);
             speechRecognizer.startListening(intent);
         } catch(Exception e){
@@ -566,7 +604,7 @@ public class MainActivity extends Activity {
             EditText target=pendingVoiceTarget;
             pendingVoiceTarget=null;
             if (ok) {
-                startOfflineVoice(target);
+                startVoice(target);
             } else {
                 Toast.makeText(this, "ভয়েস সার্চের অনুমতি দেওয়া হয়নি। লিখে খুঁজতে পারবেন।", Toast.LENGTH_LONG).show();
                 if (target == null) renderIndex();
