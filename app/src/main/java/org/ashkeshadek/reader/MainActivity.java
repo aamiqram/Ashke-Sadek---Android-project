@@ -73,6 +73,33 @@ public class MainActivity extends Activity {
     private static final int SONG_BATCH_SIZE = 60;
     private static final String PREFS = "ashke_shadek_local";
     private static final int MIC_PERMISSION = 410;
+    private static final Pattern WORD_PATTERN =
+            Pattern.compile("[\\p{L}\\p{M}\\p{N}]+");
+    private static final Pattern NORMALIZE_SEPARATOR_PATTERN =
+            Pattern.compile("[\\p{Punct}\\p{Z}\\s\\u200c\\u200d]+");
+    private static final String[][] OLD_BENGALI_ALIASES = {
+            {"হইয়াছে", "হয়েছে"}, {"হইয়াছে", "হয়েছে"}, {"হইয়াছি", "হয়েছি"},
+            {"করিয়াছি", "করেছি"}, {"করিয়াছে", "করেছে"}, {"করিয়াছেন", "করেছেন"},
+            {"হইয়া", "হয়ে"}, {"হইয়ে", "হয়ে"}, {"হইলে", "হলে"},
+            {"হইতে", "হতে"}, {"হইবে", "হবে"}, {"হইল", "হল"},
+            {"করিয়া", "করে"}, {"করিতে", "করতে"}, {"করিতেছে", "করছে"},
+            {"করতেছে", "করছে"}, {"যাইতেছে", "যাচ্ছে"}, {"যাইয়া", "গিয়ে"},
+            {"দিয়া", "দিয়ে"}, {"লইয়া", "নিয়ে"}, {"পাইয়া", "পেয়ে"},
+            {"খাইয়া", "খেয়ে"}, {"বলিয়া", "বলে"}, {"দেখিয়া", "দেখে"},
+            {"তাহার", "তার"}, {"তাহাকে", "তাকে"}, {"যাহা", "যা"},
+            {"যাহার", "যার"}, {"যাহাতে", "যাতে"}, {"ইহা", "এটা"}
+    };
+    private static final Pattern[] OLD_BENGALI_ALIAS_PATTERNS = buildAliasPatterns();
+
+    private static Pattern[] buildAliasPatterns() {
+        Pattern[] patterns = new Pattern[OLD_BENGALI_ALIASES.length];
+        for (int i = 0; i < OLD_BENGALI_ALIASES.length; i++) {
+            patterns[i] = Pattern.compile("(?<![\\p{L}\\p{M}])"
+                    + Pattern.quote(OLD_BENGALI_ALIASES[i][0])
+                    + "(?![\\p{L}\\p{M}])");
+        }
+        return patterns;
+    }
 
     private final List<Song> songs = new ArrayList<>();
     private final List<String> volumeNames = new ArrayList<>();
@@ -496,22 +523,10 @@ public class MainActivity extends Activity {
 
     /** Search-only spelling bridge; displayed lyrics always remain in the original text. */
     private String modernizeOldBengali(String value) {
-        String[][] aliases = {
-                {"হইয়াছে", "হয়েছে"}, {"হইয়াছে", "হয়েছে"}, {"হইয়াছি", "হয়েছি"},
-                {"করিয়াছি", "করেছি"}, {"করিয়াছে", "করেছে"}, {"করিয়াছেন", "করেছেন"},
-                {"হইয়া", "হয়ে"}, {"হইয়ে", "হয়ে"}, {"হইলে", "হলে"},
-                {"হইতে", "হতে"}, {"হইবে", "হবে"}, {"হইল", "হল"},
-                {"করিয়া", "করে"}, {"করিতে", "করতে"}, {"করিতেছে", "করছে"},
-                {"করতেছে", "করছে"}, {"যাইতেছে", "যাচ্ছে"}, {"যাইয়া", "গিয়ে"},
-                {"দিয়া", "দিয়ে"}, {"লইয়া", "নিয়ে"}, {"পাইয়া", "পেয়ে"},
-                {"খাইয়া", "খেয়ে"}, {"বলিয়া", "বলে"}, {"দেখিয়া", "দেখে"},
-                {"তাহার", "তার"}, {"তাহাকে", "তাকে"}, {"যাহা", "যা"},
-                {"যাহার", "যার"}, {"যাহাতে", "যাতে"}, {"ইহা", "এটা"}
-        };
         String result = Normalizer.normalize(value == null ? "" : value, Normalizer.Form.NFC);
-        for (String[] alias : aliases) {
-            result = result.replaceAll("(?<![\\p{L}\\p{M}])" + Pattern.quote(alias[0])
-                    + "(?![\\p{L}\\p{M}])", Matcher.quoteReplacement(alias[1]));
+        for (int i = 0; i < OLD_BENGALI_ALIASES.length; i++) {
+            Matcher matcher = OLD_BENGALI_ALIAS_PATTERNS[i].matcher(result);
+            result = matcher.replaceAll(Matcher.quoteReplacement(OLD_BENGALI_ALIASES[i][1]));
         }
         return result;
     }
@@ -526,7 +541,7 @@ public class MainActivity extends Activity {
     private Set<String> searchWords(String value) {
         Set<String> words = new HashSet<>();
         if (value == null) return words;
-        Matcher matcher = Pattern.compile("[\\p{L}\\p{M}\\p{N}]+").matcher(value);
+        Matcher matcher = WORD_PATTERN.matcher(value);
         while (matcher.find()) {
             String word = normalize(matcher.group());
             if (word.length() >= 2) words.add(word);
@@ -1020,7 +1035,7 @@ public class MainActivity extends Activity {
         if(value==null)return "";
         String s=Normalizer.normalize(value,Normalizer.Form.NFC).toLowerCase(Locale.ROOT).trim();
         s=s.replace("য়","য়").replace("ড়","ড়").replace("ঢ়","ড়").replace("ৎ","ত");
-        s=s.replaceAll("[\\p{Punct}\\p{Z}\\s\\u200c\\u200d]+","");
+        s=NORMALIZE_SEPARATOR_PATTERN.matcher(s).replaceAll("");
         return s;
     }
 
