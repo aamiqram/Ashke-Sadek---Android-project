@@ -37,6 +37,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.util.Log;
+import android.util.JsonReader;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -44,6 +45,8 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.IOException;
 import java.io.OutputStream;
 import java.text.Normalizer;
 import java.util.ArrayList;
@@ -166,55 +169,139 @@ public class MainActivity extends Activity {
         AppUpdater.resumePendingInstall(this);
     }
 
+    /**
+     * Parse one song at a time. JsonReader avoids keeping the full 2.35 MB
+     * JSON object tree alive alongside the final Song objects during startup.
+     * Lyrics are reconstructed directly from their canonical Word paragraphs;
+     * each paragraph is stored once in Song.lyrics and represented by offsets.
+     */
     private void loadCatalog() {
         try (InputStream input = openCatalog();
-             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            InputStream in = input;
-            byte[] buffer = new byte[8192];
-            int count;
-            while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
-            in.close();
-            JSONObject data = new JSONObject(out.toString("UTF-8"));
-            JSONArray array = data.getJSONArray("songs");
-            for (int i = 0; i < array.length(); i++) {
-                JSONObject item = array.getJSONObject(i);
-                String lyrics = item.optString("lyrics", "");
-                List<LyricBlock> blocks = new ArrayList<>();
-                JSONArray blockArray = item.optJSONArray("lyricBlocks");
-                int lyricCursor = 0;
-                if (blockArray != null) {
-                    for (int blockIndex = 0; blockIndex < blockArray.length(); blockIndex++) {
-                        JSONObject block = blockArray.getJSONObject(blockIndex);
-                        String paragraphText = block.optString("text", "");
-                        int paragraphStart = lyrics.indexOf(paragraphText, lyricCursor);
-                        if (paragraphStart < 0) {
-                            throw new IllegalStateException("Lyric paragraph offset mismatch in "
-                                    + item.optString("id", "unknown song"));
-                        }
-                        int paragraphEnd = paragraphStart + paragraphText.length();
-                        blocks.add(new LyricBlock(
-                                paragraphStart, paragraphEnd, block.optInt("alignment", 0),
-                                (float) block.optDouble("leftIndentPt", 0),
-                                (float) block.optDouble("firstLineIndentPt", 0),
-                                (float) block.optDouble("rightIndentPt", 0),
-                                (float) block.optDouble("spaceBeforePt", 0),
-                                (float) block.optDouble("spaceAfterPt", 0)
-                        ));
-                        lyricCursor = paragraphEnd;
-                        if (lyricCursor < lyrics.length() && lyrics.charAt(lyricCursor) == '\n') {
-                            lyricCursor++;
-                        }
-                    }
+             JsonReader reader = new JsonReader(new InputStreamReader(input, "UTF-8"))) {
+            boolean foundSongs = false;
+            reader.beginObject();
+            while (reader.hasNext()) {
+                String name = reader.nextName();
+                if ("songs".equals(name)) {
+                    foundSongs = true;
+                    reader.beginArray();
+                    while (reader.hasNext()) songs.add(readSong(reader));
+                    reader.endArray();
+                } else {
+                    reader.skipValue();
                 }
-                Song song = new Song(
-                        item.getString("id"), item.getInt("volume"), item.getInt("number"),
-                        item.getString("title"), lyrics, item.optString("category", ""), blocks
-                );
-                songs.add(song);
             }
-        } catch (Exception e) {
-            Toast.makeText(this, "গানের তালিকা খোলা যায়নি। অ্যাপটি পুনরায় ইনস্টল করুন।", Toast.LENGTH_LONG).show();
+            reader.endObject();
+            if (!foundSongs || songs.size() != 615) {
+                throw new IllegalStateException("Catalogue song count mismatch: " + songs.size());
+            }
+        } catch (Exception error) {
+            songs.clear();
+            Log.e("AshkeCatalog", "Could not stream the song catalogue.", error);
+            Toast.makeText(this, "গানের তালিকা খোলা যায়নি। অ্যাপটি পুনরায় ইনস্টল করুন।",
+                    Toast.LENGTH_LONG).show();
         }
+    }
+
+    private Song readSong(JsonReader reader) throws IOException {
+        String id = "";
+        String title = "";
+        String category = "";
+        int volume = 0;
+        int number = 0;
+        StringBuilder lyrics = new StringBuilder();
+        List<LyricBlock> blocks = new ArrayList<>();
+
+        reader.beginObject();
+        while (reader.hasNext()) {
+            String name = reader.nextName();
+            switch (name) {
+                case "id":
+                    id = reader.nextString();
+                    break;
+                case "volume":
+                    volume = reader.nextInt();
+                    break;
+                case "number":
+                    number = reader.nextInt();
+                    break;
+                case "title":
+                    title = reader.nextString();
+                    break;
+                case "category":
+                    category = reader.nextString();
+                    break;
+                case "lyricBlocks":
+                    reader.beginArray();
+                    while (reader.hasNext()) {
+                        appendLyricBlock(reader, lyrics, blocks);
+                    }
+                    reader.endArray();
+                    break;
+                default:
+                    // "lyrics", "firstLine" and source metadata are derivable
+                    // from paragraph blocks or are not required by the reader.
+                    reader.skipValue();
+                    break;
+            }
+        }
+        reader.endObject();
+
+        if (id.isEmpty() || title.isEmpty() || volume < 1 || volume > 3
+                || number < 1 || blocks.isEmpty()) {
+            throw new IOException("Invalid song record: " + id);
+        }
+        return new Song(id, volume, number, title, lyrics.toString(), category, blocks);
+    }
+
+    private void appendLyricBlock(JsonReader reader, StringBuilder lyrics,
+                                  List<LyricBlock> blocks) throws IOException {
+        String text = "";
+        int alignment = 0;
+        float leftIndent = 0f;
+        float firstLineIndent = 0f;
+        float rightIndent = 0f;
+        float spaceBefore = 0f;
+        float spaceAfter = 0f;
+
+        reader.beginObject();
+        while (reader.hasNext()) {
+            String name = reader.nextName();
+            switch (name) {
+                case "text":
+                    text = reader.nextString();
+                    break;
+                case "alignment":
+                    alignment = reader.nextInt();
+                    break;
+                case "leftIndentPt":
+                    leftIndent = (float) reader.nextDouble();
+                    break;
+                case "firstLineIndentPt":
+                    firstLineIndent = (float) reader.nextDouble();
+                    break;
+                case "rightIndentPt":
+                    rightIndent = (float) reader.nextDouble();
+                    break;
+                case "spaceBeforePt":
+                    spaceBefore = (float) reader.nextDouble();
+                    break;
+                case "spaceAfterPt":
+                    spaceAfter = (float) reader.nextDouble();
+                    break;
+                default:
+                    reader.skipValue();
+                    break;
+            }
+        }
+        reader.endObject();
+
+        if (!blocks.isEmpty()) lyrics.append('\n');
+        int start = lyrics.length();
+        lyrics.append(text);
+        int end = lyrics.length();
+        blocks.add(new LyricBlock(start, end, alignment, leftIndent, firstLineIndent,
+                rightIndent, spaceBefore, spaceAfter));
     }
 
     /** Gradle unzips .gz assets, so the packaged file is songs.json — accept both. */
@@ -1380,7 +1467,28 @@ public class MainActivity extends Activity {
     private LinearLayout.LayoutParams matchHeight(int height){return new LinearLayout.LayoutParams(-1,dp(height));}
     private void addSpace(LinearLayout parent,int height){View v=new View(this);parent.addView(v,new LinearLayout.LayoutParams(1,dp(height)));}
     private interface TextChangeListener { void onTextChanged(String value); }
-    private TextWatcher watcher(TextChangeListener callback){return new TextWatcher(){public void beforeTextChanged(CharSequence s,int st,int c,int a){}public void onTextChanged(CharSequence s,int st,int before,int count){callback.onTextChanged(s.toString());}public void afterTextChanged(Editable e){}};}
+
+    /**
+     * One search pass after the user pauses briefly, rather than rebuilding
+     * transient Bengali/phonetic search forms for all 615 songs on every key.
+     */
+    private TextWatcher watcher(TextChangeListener callback) {
+        return new TextWatcher() {
+            private final Handler handler = new Handler(Looper.getMainLooper());
+            private Runnable pending;
+
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                if (pending != null) handler.removeCallbacks(pending);
+                String query = s.toString();
+                pending = () -> callback.onTextChanged(query);
+                handler.postDelayed(pending, 140L);
+            }
+
+            @Override public void afterTextChanged(Editable editable) { }
+        };
+    }
 
     @Override public void onBackPressed(){
         if(currentScreen.equals("reader")){
