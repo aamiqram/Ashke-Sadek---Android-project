@@ -361,7 +361,10 @@ final class AppUpdater {
             if (response < 200 || response >= 300) {
                 throw new IllegalStateException("GitHub থেকে APK পাওয়া যায়নি (HTTP " + response + ")।");
             }
-            if (connection.getContentLengthLong() > MAX_APK_BYTES) {
+            // getContentLength() is available from Android 1.1; the 250 MiB
+            // cap safely fits its signed 32-bit return value on minSdk 21.
+            int declaredLength = connection.getContentLength();
+            if (declaredLength > MAX_APK_BYTES) {
                 throw new IllegalStateException("APK ফাইলটি অনুমোদিত আকারের চেয়ে বড়।");
             }
             try (InputStream input = new BufferedInputStream(connection.getInputStream());
