@@ -1,0 +1,81 @@
+name: Publish installable Android release
+
+on:
+  workflow_run:
+    workflows: ["Build Android APK"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: ashke-shadek-beta-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download installable APK from the successful build
+        uses: actions/download-artifact@v4
+        with:
+          name: ashke-shadek-installable-debug-apk
+          path: release-assets
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Prepare release file and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find release-assets -type f -name '*.apk' -print -quit)"
+          if [ -z "$APK" ]; then
+            echo "The successful build did not contain an installable APK."
+            exit 1
+          fi
+          cp "$APK" Ashke-Shadek-v1.0.0-beta.1.apk
+          sha256sum Ashke-Shadek-v1.0.0-beta.1.apk > SHA256SUMS.txt
+          cat > release-notes.md <<'EOF'
+          ## এশকে ছাদেক — Android beta
+
+          Installable Android APK for the first offline Bengali voice-search beta.
+
+          ### What's included
+          - 615 Bengali songs across all three volumes, available offline.
+          - Responsive song reader with proportional source paragraph alignment.
+          - App-bundled Bengali offline voice recognition; it does not depend on the phone's installed speech-recognition service or Bengali language pack.
+          - Favourites, bookmarks, recent songs, last-read position, song-number jump, and text search.
+
+          ### Install
+          1. Download Ashke-Shadek-v1.0.0-beta.1.apk below.
+          2. Open it on Android and allow installation from the browser/file manager when Android asks.
+          3. Open voice search and grant microphone permission when prompted.
+
+          ### Compatibility and known limitations
+          - Minimum Android version: Android 5.0 (API 21).
+          - The APK is large because the speech model is bundled for offline use.
+          - Recognition latency and accuracy vary with device CPU, available RAM, microphone and background noise. Physical-device QA across manufacturers is still required.
+          - This beta is debug-signed for direct testing. It is not the final Play Store or production-signed build. Installing over a differently signed previous copy may require uninstalling that copy first; uninstalling removes its local favourites and bookmarks.
+
+          The attached SHA256SUMS file verifies the APK download.
+          EOF
+
+      - name: Create or refresh the beta GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v1.0.0-beta.1
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" Ashke-Shadek-v1.0.0-beta.1.apk SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" \
+              Ashke-Shadek-v1.0.0-beta.1.apk SHA256SUMS.txt \
+              --title "এশকে ছাদেক Android — First Offline ASR Beta" \
+              --prerelease \
+              --notes-file release-notes.md
+          fi
