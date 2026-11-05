@@ -927,66 +927,6 @@ public class MainActivity extends Activity {
         return s;
     }
 
-    private Set<String> searchWords(String value) {
-        Set<String> words = new HashSet<>();
-        if (value == null) return words;
-        Matcher matcher = Pattern.compile("[\\p{L}\\p{M}\\p{N}]+").matcher(value);
-        while (matcher.find()) {
-            String word = normalize(matcher.group());
-            if (word.length() >= 2) words.add(word);
-        }
-        return words;
-    }
-
-    private String modernizeOldBengali(String value) {
-        String[][] aliases = {
-                {"হইয়াছে", "হয়েছে"}, {"হইয়াছে", "হয়েছে"}, {"হইয়াছি", "হয়েছি"},
-                {"করিয়াছি", "করেছি"}, {"করিয়াছে", "করেছে"}, {"করিয়াছেন", "করেছেন"},
-                {"হইয়া", "হয়ে"}, {"হইয়ে", "হয়ে"}, {"হইলে", "হলে"},
-                {"হইতে", "হতে"}, {"হইবে", "হবে"}, {"হইল", "হল"},
-                {"করিয়া", "করে"}, {"করিতে", "করতে"}, {"করিতেছে", "করছে"},
-                {"করতেছে", "করছে"}, {"যাইতেছে", "যাচ্ছে"}, {"যাইয়া", "গিয়ে"},
-                {"দিয়া", "দিয়ে"}, {"লইয়া", "নিয়ে"}, {"পাইয়া", "পেয়ে"},
-                {"খাইয়া", "খেয়ে"}, {"বলিয়া", "বলে"}, {"দেখিয়া", "দেখে"},
-                {"তাহার", "তার"}, {"তাহাকে", "তাকে"}, {"যাহা", "যা"},
-                {"যাহার", "যার"}, {"যাহাতে", "যাতে"}, {"ইহা", "এটা"}
-        };
-        String result = Normalizer.normalize(value == null ? "" : value, Normalizer.Form.NFC);
-        for (String[] alias : aliases) {
-            result = result.replaceAll("(?<![\\p{L}\\p{M}])" + Pattern.quote(alias[0])
-                    + "(?![\\p{L}\\p{M}])", Matcher.quoteReplacement(alias[1]));
-        }
-        return result;
-    }
-
-    private String phoneticNormalize(String value) {
-        String result = normalize(value);
-        return result.replace("শ", "স").replace("ষ", "স").replace("ণ", "ন")
-                .replace("ী", "ি").replace("ঈ", "ই").replace("ূ", "ু")
-                .replace("ঊ", "উ").replace("ৎ", "ত");
-    }
-
-    private boolean hasOneEditMatch(String query, Set<String> candidates) {
-        for (String candidate : candidates) {
-            if (Math.abs(candidate.length() - query.length()) > 1 || candidate.length() < 3) continue;
-            if (oneEditAway(query, candidate)) return true;
-        }
-        return false;
-    }
-
-    private boolean oneEditAway(String first, String second) {
-        int i = 0, j = 0, edits = 0;
-        while (i < first.length() && j < second.length()) {
-            if (first.charAt(i) == second.charAt(j)) { i++; j++; continue; }
-            if (++edits > 1) return false;
-            if (first.length() > second.length()) i++;
-            else if (second.length() > first.length()) j++;
-            else { i++; j++; }
-        }
-        if (i < first.length() || j < second.length()) edits++;
-        return edits <= 1;
-    }
-
     private Song byId(String id){for(Song s:songs)if(s.id.equals(id))return s;return null;}
     private Song byPosition(int volume,int number){for(Song s:songs)if(s.volume==volume&&s.number==number)return s;return null;}
     private int countInVolume(int volume){int c=0;for(Song s:songs)if(s.volume==volume)c++;return c;}
