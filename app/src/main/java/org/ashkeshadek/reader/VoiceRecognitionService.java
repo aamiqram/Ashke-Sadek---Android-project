@@ -119,8 +119,12 @@ public final class VoiceRecognitionService extends Service {
                 + " nativeHeapKb=" + (android.os.Debug.getNativeHeapAllocatedSize() / 1024L));
     }
 
+    private final IBinder processConnection = new android.os.Binder();
+
     @Override public IBinder onBind(Intent intent) {
-        return null;
+        // The binder is only a liveness signal. Commands and results travel
+        // through explicit startService intents and a ResultReceiver.
+        return processConnection;
     }
 
     @Override public void onDestroy() {
