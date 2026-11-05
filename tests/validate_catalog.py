@@ -12,6 +12,10 @@ EMPHASIS = ROOT / "app/src/main/assets/lyrics_emphasis.json.gz"
 MAIN_SOURCE = ROOT / "app/src/main/java/org/ashkeshadek/reader/MainActivity.java"
 VOICE_SOURCE = ROOT / "app/src/main/java/org/ashkeshadek/reader/OfflineBengaliVoice.java"
 VOICE_SERVICE = ROOT / "app/src/main/java/org/ashkeshadek/reader/VoiceRecognitionService.java"
+APP_UPDATER = ROOT / "app/src/main/java/org/ashkeshadek/reader/AppUpdater.java"
+UPDATE_RECEIVER = ROOT / "app/src/main/java/org/ashkeshadek/reader/UpdateInstallReceiver.java"
+BUILD_WORKFLOW = ROOT / ".github/workflows/build-apk.yml"
+RELEASE_WORKFLOW = ROOT / ".github/workflows/release-apk.yml"
 MANIFEST = ROOT / "app/src/main/AndroidManifest.xml"
 
 payload = json.loads(gzip.decompress(CATALOG.read_bytes()).decode("utf-8"))
@@ -84,6 +88,27 @@ assert "android.permission.REQUEST_INSTALL_PACKAGES" in permissions, "Install-pa
 assert "android.permission.RECORD_AUDIO" in permissions, "Voice permission declaration missing"
 application = root.find("application")
 assert application is not None
+
+# In-app updates must use only signed release assets and Android's own installer.
+updater_source = APP_UPDATER.read_text(encoding="utf-8")
+receiver_source = UPDATE_RECEIVER.read_text(encoding="utf-8")
+build_workflow = BUILD_WORKFLOW.read_text(encoding="utf-8")
+release_workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+assert "RELEASE_ASSET_PREFIX" in updater_source and "update.json" in updater_source
+assert "sha256(apk)" in updater_source
+assert "getPackageArchiveInfo" in updater_source
+assert "installedCertificate" in updater_source
+assert "session.commit" in updater_source and "PackageInstaller" in updater_source
+assert "getContentLengthLong" not in updater_source, "Updater must remain compatible with minSdk 21"
+assert "ACTION_MANAGE_UNKNOWN_APP_SOURCES" in updater_source
+assert "STATUS_PENDING_USER_ACTION" in receiver_source
+assert "ASHKE_KEYSTORE_BASE64" in build_workflow
+assert "ashke-shadek-signed-release-apk" in release_workflow
+assert "ashke-shadek-installable-debug-apk" not in release_workflow
+assert "ASHKE_STABLE_RELEASE_READY" in release_workflow
+assert "Ashke-Shadek-User-Data-Backup.json" in main_source
+assert "USER_DATA_BACKUP_FORMAT" in main_source
+assert "restoreUserDataBackup" in main_source
 assert application.attrib.get(android + "allowBackup") == "false"
 voice_services = [node for node in application.findall("service")
                   if node.attrib.get(android + "name") == ".VoiceRecognitionService"]
