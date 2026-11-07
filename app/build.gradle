@@ -41,6 +41,9 @@ if (releaseKeyPath) {
         keyPassword System.getenv('ASHKE_KEY_PASSWORD')
     }
     android.buildTypes.release.signingConfig android.signingConfigs.stableRelease
+    // Keep QA APKs installable over releases built with the same permanent key.
+    // Without the key, CI's generated debug certificate changes on every run.
+    android.buildTypes.debug.signingConfig android.signingConfigs.stableRelease
 }
 dependencies {
     implementation files(sherpaAar)

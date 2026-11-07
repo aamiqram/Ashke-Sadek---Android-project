@@ -2,6 +2,7 @@ package org.ashkeshadek.reader;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.content.Intent;
@@ -33,10 +34,12 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
 import android.widget.Button;
+import android.widget.BaseAdapter;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ListView;
 import android.widget.ProgressBar;
 import android.widget.Spinner;
 import android.widget.ScrollView;
@@ -141,7 +144,16 @@ public class MainActivity extends Activity {
     private LinearLayout page;
     private String currentScreen = "home";
     private Song currentSong;
-    private ScrollView readerScroll;
+    private ListView readerList;
+    private List<Song> readerBookSongs = Collections.emptyList();
+    private SongReaderAdapter readerAdapter;
+    private TextView readerHeaderTitle;
+    private TextView readerHeaderSubtitle;
+    private int readerPageWidthPx;
+    private int readerTextMeasurePx;
+    private String lastReaderOffsetSongId = "";
+    private int lastReaderOffsetPx = -1;
+    private long lastReaderOffsetWriteMs;
     private EditText activeSearch;
     private EditText pendingVoiceTarget = null;
     private ResultReceiver voiceReceiver;
@@ -164,8 +176,18 @@ public class MainActivity extends Activity {
     private boolean voiceListeningStarted = false;
     private boolean voiceCandidateSelected;
     private boolean catalogReady;
+    private volatile boolean searchIndexReady;
+    private LinearLayout activeSearchResults;
+    private String activeSearchQuery = "";
+    private int activeSearchVolumeFilter;
+    private String latestVoiceTranscript = "";
+    private boolean homeHasInteracted;
+    private View homeLoadingIndicator;
     private long launchStartedUptimeMs;
     private long voiceSessionStartedUptimeMs;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private Runnable voicePrewarmTask;
+    private boolean voiceModelServiceActive;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -185,7 +207,7 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 23) lightSystemBars |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
         if (Build.VERSION.SDK_INT >= 26) lightSystemBars |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         if (lightSystemBars != 0) getWindow().getDecorView().setSystemUiVisibility(lightSystemBars);
-        renderStartupScreen();
+        renderHome();
         loadCatalogInBackground();
         long lastUpdateCheck = prefs.getLong("last_update_check_ms", 0L);
         if (System.currentTimeMillis() - lastUpdateCheck >= 24L * 60L * 60L * 1000L) {
@@ -217,6 +239,8 @@ public class MainActivity extends Activity {
 
     private void loadCatalogInBackground() {
         catalogReady = false;
+        searchIndexReady = false;
+        activeSearchResults = null;
         if (page != null && currentScreen.equals("loading")) {
             TextView status = page.findViewWithTag("startup-status");
             if (status != null) status.setText("গানের বই প্রস্তুত হচ্ছে…");
@@ -228,7 +252,6 @@ public class MainActivity extends Activity {
             searchIndex.clear();
             boolean loaded = loadCatalog();
             if (loaded) {
-                buildSearchIndex();
                 loadEmphasis();
                 enforceStorageBudget();
             }
@@ -242,13 +265,46 @@ public class MainActivity extends Activity {
                 catalogReady = true;
                 favorites = new LinkedHashSet<>(prefs.getStringSet("favorites", Collections.emptySet()));
                 bookmarks = new LinkedHashSet<>(prefs.getStringSet("bookmarks", Collections.emptySet()));
+                if (homeLoadingIndicator != null) homeLoadingIndicator.setVisibility(View.GONE);
                 logMemory("main-after-catalog");
-                Log.i("AshkeStartup", "catalogReadyMs=" + catalogElapsed
+                Log.i("AshkeStartup", "catalogDataReadyMs=" + catalogElapsed
                         + " firstScreenMs=" + (SystemClock.uptimeMillis() - launchStartedUptimeMs));
                 appendPerformanceDiagnostic("catalogReadyMs=" + catalogElapsed
                         + ", firstScreenMs=" + (SystemClock.uptimeMillis() - launchStartedUptimeMs));
-                renderHome();
+                if (currentScreen.equals("loading")
+                        || (currentScreen.equals("home") && !homeHasInteracted)) {
+                    renderHome();
+                } else if (activeSearchResults != null) {
+                    String query = activeSearch == null
+                            ? activeSearchQuery : activeSearch.getText().toString();
+                    renderSearchResults(activeSearchResults, query, activeSearchVolumeFilter);
+                }
             });
+            if (loaded) {
+                new Thread(() -> {
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
+                    long indexStarted = SystemClock.uptimeMillis();
+                    buildSearchIndex();
+                    searchIndexReady = true;
+                    long indexElapsed = SystemClock.uptimeMillis() - indexStarted;
+                    runOnUiThread(() -> {
+                        if (isFinishing() || isDestroyed()) return;
+                        Log.i("AshkeStartup", "searchIndexReadyMs=" + indexElapsed
+                                + " totalStartupMs=" + (SystemClock.uptimeMillis() - launchStartedUptimeMs));
+                        appendPerformanceDiagnostic("searchIndexReadyMs=" + indexElapsed
+                                + ", totalStartupMs=" + (SystemClock.uptimeMillis() - launchStartedUptimeMs));
+                        if (activeSearchResults != null) {
+                            String query = activeSearch == null
+                                    ? activeSearchQuery : activeSearch.getText().toString();
+                            renderSearchResults(activeSearchResults, query, activeSearchVolumeFilter);
+                        }
+                        if (!latestVoiceTranscript.isEmpty()) {
+                            renderVoiceCandidates(latestVoiceTranscript);
+                        }
+                        scheduleOfflineVoicePrewarm();
+                    });
+                }, "ashke-search-index").start();
+            }
         }, "ashke-catalog-startup").start();
     }
 
@@ -486,7 +542,9 @@ public class MainActivity extends Activity {
         LinearLayout titleBox = new LinearLayout(this);
         titleBox.setOrientation(LinearLayout.VERTICAL);
         TextView brand = label(title, 21, TEXT, true);
+        brand.setTag("screen-title");
         TextView sub = label(subtitle, 11, MUTED, false);
+        sub.setTag("screen-subtitle");
         titleBox.addView(brand);
         if (subtitle != null && !subtitle.isEmpty()) titleBox.addView(sub);
         LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, -2, 1f);
@@ -501,8 +559,13 @@ public class MainActivity extends Activity {
 
     private void renderHome() {
         currentScreen = "home";
+        homeLoadingIndicator = null;
         mount("এশকে ছাদেক", "ভান্ডারী গানের বই", false, true);
         ScrollView scroll = pageScroll();
+        scroll.setOnTouchListener((view, event) -> {
+            if (event.getAction() == android.view.MotionEvent.ACTION_MOVE) homeHasInteracted = true;
+            return false;
+        });
         LinearLayout body = (LinearLayout) scroll.getChildAt(0);
         body.setPadding(dp(18), dp(6), dp(18), dp(22));
 
@@ -520,7 +583,22 @@ public class MainActivity extends Activity {
         body.addView(hero, matchWrap());
         addSpace(body, 18);
 
-        if (!lastSongId.isEmpty()) {
+        if (!catalogReady) {
+            LinearLayout loading = new LinearLayout(this);
+            loading.setGravity(Gravity.CENTER_VERTICAL);
+            loading.setPadding(dp(4), 0, dp(4), 0);
+            ProgressBar progress = new ProgressBar(this);
+            loading.addView(progress, new LinearLayout.LayoutParams(dp(18), dp(18)));
+            TextView loadingText = label("গানের তালিকা প্রস্তুত হচ্ছে…", 11, MUTED, false);
+            LinearLayout.LayoutParams loadingTextParams = new LinearLayout.LayoutParams(-2, -2);
+            loadingTextParams.leftMargin = dp(8);
+            loading.addView(loadingText, loadingTextParams);
+            body.addView(loading, matchWrap());
+            homeLoadingIndicator = loading;
+            addSpace(body, 10);
+        }
+
+        if (catalogReady && !lastSongId.isEmpty()) {
             Song last = byId(lastSongId);
             if (last != null) {
                 LinearLayout continueCard = cardColumn();
@@ -535,7 +613,12 @@ public class MainActivity extends Activity {
             }
         }
         List<Song> recentToShow = new ArrayList<>();
-        for (String rid : recentIds) { Song rs = byId(rid); if (rs == null || lastSongId.equals(rid)) continue; recentToShow.add(rs); if (recentToShow.size() >= 4) break; }
+        if (catalogReady) for (String rid : recentIds) {
+            Song rs = byId(rid);
+            if (rs == null || lastSongId.equals(rid)) continue;
+            recentToShow.add(rs);
+            if (recentToShow.size() >= 4) break;
+        }
         if (!recentToShow.isEmpty()) {
             body.addView(label("সম্প্রতি পড়া গান", 17, TEXT, true));
             addSpace(body, 8);
@@ -560,7 +643,10 @@ public class MainActivity extends Activity {
         body.addView(searchInputRow(search), matchWrap());
         LinearLayout results = new LinearLayout(this); results.setOrientation(LinearLayout.VERTICAL);
         body.addView(results);
-        search.addTextChangedListener(watcher(text -> renderSearchResults(results, text, 0)));
+        search.addTextChangedListener(watcher(text -> {
+            if (!text.isEmpty()) homeHasInteracted = true;
+            renderSearchResults(results, text, 0);
+        }));
         addSpace(body, 18);
 
         body.addView(label("তিনটি খণ্ড", 18, TEXT, true));
@@ -574,10 +660,18 @@ public class MainActivity extends Activity {
             info.setPadding(dp(12), 0, 0, 0);
             info.addView(label(volumeNames.get(v - 1), 16, TEXT, true));
             addSpace(info, 3);
-            info.addView(label(countInVolume(v) + "টি গান", 12, MUTED, false));
+            int count = catalogReady ? countInVolume(v) : new int[]{0, 82, 289, 244}[v];
+            info.addView(label(count + "টি গান", 12, MUTED, false));
             volumeCard.addView(info, new LinearLayout.LayoutParams(0, -2, 1f));
             volumeCard.addView(label("›", 26, GREEN, true));
-            volumeCard.setOnClickListener(view -> renderVolume(volume));
+            volumeCard.setOnClickListener(view -> {
+                homeHasInteracted = true;
+                if (!catalogReady) {
+                    Toast.makeText(this, "গানের তালিকা প্রস্তুত হচ্ছে…", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                renderVolume(volume);
+            });
             body.addView(volumeCard, matchWrap());
             addSpace(body, 9);
         }
@@ -589,8 +683,16 @@ public class MainActivity extends Activity {
         TextView marks = quickTile("▣", "বুকমার্ক", bookmarks.size());
         quick.addView(fav, new LinearLayout.LayoutParams(0, dp(86), 1f));
         LinearLayout.LayoutParams markLp = new LinearLayout.LayoutParams(0, dp(86), 1f); markLp.leftMargin = dp(9); quick.addView(marks, markLp);
-        fav.setOnClickListener(v -> renderSaved("favorites"));
-        marks.setOnClickListener(v -> renderSaved("bookmarks"));
+        fav.setOnClickListener(v -> {
+            homeHasInteracted = true;
+            if (catalogReady) renderSaved("favorites");
+            else Toast.makeText(this, "গানের তালিকা প্রস্তুত হচ্ছে…", Toast.LENGTH_SHORT).show();
+        });
+        marks.setOnClickListener(v -> {
+            homeHasInteracted = true;
+            if (catalogReady) renderSaved("bookmarks");
+            else Toast.makeText(this, "গানের তালিকা প্রস্তুত হচ্ছে…", Toast.LENGTH_SHORT).show();
+        });
         body.addView(quick);
 
         addSpace(body, 16);
@@ -603,7 +705,10 @@ public class MainActivity extends Activity {
         updateInfo.addView(label("নতুন সংস্করণ খুঁজুন", 12, MUTED, false));
         updateCard.addView(updateInfo, new LinearLayout.LayoutParams(0, -2, 1f));
         updateCard.addView(label("›", 24, GREEN, true));
-        updateCard.setOnClickListener(v -> checkForAppUpdates(true));
+        updateCard.setOnClickListener(v -> {
+            homeHasInteracted = true;
+            checkForAppUpdates(true);
+        });
         body.addView(updateCard, matchWrap());
 
         addSpace(body, 8);
@@ -616,7 +721,11 @@ public class MainActivity extends Activity {
         backupInfo.addView(label("প্রিয় গান, বুকমার্ক ও পড়ার অবস্থান", 11, MUTED, false));
         backupCard.addView(backupInfo, new LinearLayout.LayoutParams(0, -2, 1f));
         backupCard.addView(label("›", 24, GREEN, true));
-        backupCard.setOnClickListener(v -> showUserDataBackupOptions());
+        backupCard.setOnClickListener(v -> {
+            homeHasInteracted = true;
+            if (catalogReady) showUserDataBackupOptions();
+            else Toast.makeText(this, "গানের তালিকা প্রস্তুত হচ্ছে…", Toast.LENGTH_SHORT).show();
+        });
         body.addView(backupCard, matchWrap());
 
         addSpace(body, 8);
@@ -1226,6 +1335,9 @@ public class MainActivity extends Activity {
 
     private void renderSearchResults(LinearLayout target, String query, int volumeFilter) {
         target.removeAllViews();
+        activeSearchResults = target;
+        activeSearchQuery = query == null ? "" : query;
+        activeSearchVolumeFilter = volumeFilter;
         List<Song> matches = new ArrayList<>();
         java.util.Map<String, Integer> scores = new java.util.HashMap<>();
         String q = normalize(query);
@@ -1235,6 +1347,12 @@ public class MainActivity extends Activity {
         if (direct != null) {
             matches.add(direct);
         } else {
+            if (!q.isEmpty() && !searchIndexReady) {
+                TextView preparing = label("গানের খোঁজ প্রস্তুত হচ্ছে…", 14, MUTED, false);
+                preparing.setPadding(dp(6), dp(18), dp(6), dp(18));
+                target.addView(preparing);
+                return;
+            }
             for (Song song : songs) {
                 if (volumeFilter > 0 && song.volume != volumeFilter) continue;
                 int score = q.isEmpty() ? 1 : scoreSongMatch(song, preparedQuery);
@@ -1482,88 +1600,273 @@ public class MainActivity extends Activity {
     private void openSong(Song song) {
         if (songSearchDialog != null) songSearchDialog.dismiss();
         saveReaderPosition();
-        currentSong=song; lastSongId=song.id;
-        LinkedHashSet<String> recent=new LinkedHashSet<>(); recent.add(song.id); recent.addAll(recentIds); recentIds=new ArrayList<>();
-        int added=0; for(String id:recent){if(added++>=12)break;recentIds.add(id);}
-        prefs.edit().putString("last_song",lastSongId).putString("recent",joinRecent(recentIds)).apply();
+        currentSong = song;
+        rememberSong(song);
         renderReader(song);
     }
 
+    private void rememberSong(Song song) {
+        if (song == null) return;
+        lastSongId = song.id;
+        LinkedHashSet<String> recent = new LinkedHashSet<>();
+        recent.add(song.id);
+        recent.addAll(recentIds);
+        recentIds = new ArrayList<>();
+        int added = 0;
+        for (String id : recent) {
+            if (added++ >= 12) break;
+            recentIds.add(id);
+        }
+        prefs.edit().putString("last_song", lastSongId)
+                .putString("recent", joinRecent(recentIds)).apply();
+    }
+
     private void renderReader(Song song) {
-        currentScreen="reader"; currentSong=song;
-        mount("গান "+bn(song.number),volumeNames.get(song.volume-1),true,false);
+        currentScreen = "reader";
+        currentSong = song;
+        mount("গান " + bn(song.number), volumeNames.get(song.volume - 1), true, false);
+        readerHeaderTitle = root.findViewWithTag("screen-title");
+        readerHeaderSubtitle = root.findViewWithTag("screen-subtitle");
+
         TextView headerSearch = iconButton("⌕", 22);
         headerSearch.setContentDescription("গান খুঁজুন");
         headerSearch.setOnClickListener(v -> showSongSearchDialog());
         LinearLayout.LayoutParams hsLp = new LinearLayout.LayoutParams(dp(42), dp(42));
         ((LinearLayout) root.getChildAt(0)).addView(headerSearch, hsLp);
-        FrameLayout frame=new FrameLayout(this);
-        page.addView(frame,new LinearLayout.LayoutParams(-1,0,1f));
-        readerScroll=new ScrollView(this);
-        readerScroll.setFillViewport(true);
-        readerScroll.setClipToPadding(false);
-        frame.addView(readerScroll,new FrameLayout.LayoutParams(-1,-1));
-
-        float density = getResources().getDisplayMetrics().density;
-        float screenWidthDp = getResources().getDisplayMetrics().widthPixels / density;
+        float screenWidthDp = getResources().getDisplayMetrics().widthPixels
+                / getResources().getDisplayMetrics().density;
         int availableWidth = Math.max(dp(168),
                 getResources().getDisplayMetrics().widthPixels - dp(24));
-        int readerWidth = Math.min(availableWidth, dp(760));
-        int textMeasure = Math.max(dp(132), readerWidth - dp(36));
-        final float wordTextWidthPt = 671.8f;
+        // Use a fixed book column on normal phones so the same lyric paragraphs
+        // wrap consistently on Android 7 and newer, wider devices.
+        readerPageWidthPx = Math.min(availableWidth, dp(336));
+        readerTextMeasurePx = Math.max(dp(132), readerPageWidthPx - dp(36));
 
-        FrameLayout sheet = new FrameLayout(this);
-        readerScroll.addView(sheet, new ScrollView.LayoutParams(-1, -2));
-        LinearLayout body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(18), dp(10), dp(18), dp(112));
-        FrameLayout.LayoutParams bodyParams = new FrameLayout.LayoutParams(
-                readerWidth, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        sheet.addView(body, bodyParams);
-
-        TextView meta=label(volumeNames.get(song.volume-1)+"  ·  গান "+bn(song.number),12,GREEN,true);
-        meta.setGravity(Gravity.CENTER); body.addView(meta,matchWrap()); addSpace(body,12);
-        TextView title=label(song.title,22,TEXT,true); title.setGravity(Gravity.CENTER); title.setLineSpacing(dp(4),1f); body.addView(title,matchWrap());
-        if (!song.category.isEmpty()) {
-            addSpace(body, 4);
-            TextView category = label(song.category, 13, MUTED, true);
-            category.setGravity(Gravity.RIGHT);
-            category.setPadding(0, 0, dp(4), 0);
-            body.addView(category, matchWrap());
-        }
-        addSpace(body,10);
-        View line=new View(this);line.setBackgroundColor(BORDER); LinearLayout.LayoutParams lineLp=new LinearLayout.LayoutParams(-1,dp(1)); lineLp.leftMargin=dp(22);lineLp.rightMargin=dp(22);body.addView(line,lineLp);addSpace(body,18);
-
-        LinearLayout actions=new LinearLayout(this);actions.setGravity(Gravity.CENTER);actions.setOrientation(LinearLayout.HORIZONTAL);
-        TextView favorite=readerAction(favorites.contains(song.id)?"♥":"♡",favorites.contains(song.id)?GREEN:TEXT,"প্রিয়");
-        TextView bookmark=readerAction(bookmarks.contains(song.id)?"▣":"▢",bookmarks.contains(song.id)?GREEN:TEXT,"বুকমার্ক");
-        actions.addView(favorite,new LinearLayout.LayoutParams(0,dp(62),1f));
-        LinearLayout.LayoutParams bookmarkLp = new LinearLayout.LayoutParams(0,dp(62),1f);
-        bookmarkLp.leftMargin = dp(8);
-        actions.addView(bookmark,bookmarkLp);
-        body.addView(actions);addSpace(body,18);
-        favorite.setOnClickListener(v->{toggleSet(favorites,song.id,"favorites");favorite.setText(favorites.contains(song.id)?"♥\nপ্রিয়":"♡\nপ্রিয়");favorite.setTextColor(favorites.contains(song.id)?GREEN:TEXT);});
-        bookmark.setOnClickListener(v->{toggleSet(bookmarks,song.id,"bookmarks");bookmark.setText(bookmarks.contains(song.id)?"▣\nবুকমার্ক":"▢\nবুকমার্ক");bookmark.setTextColor(bookmarks.contains(song.id)?GREEN:TEXT);});
-
-        int lyricSizeSp = currentReaderTextSizeSp(screenWidthDp);
         LinearLayout textSizeControls = new LinearLayout(this);
         textSizeControls.setOrientation(LinearLayout.HORIZONTAL);
-        textSizeControls.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+        textSizeControls.setGravity(Gravity.CENTER_VERTICAL);
+        textSizeControls.setPadding(dp(18), dp(5), dp(18), dp(5));
+        textSizeControls.setBackgroundColor(SURFACE);
         TextView textSizeLabel = label("লেখার আকার", 12, MUTED, false);
-        textSizeControls.addView(textSizeLabel, new LinearLayout.LayoutParams(0, dp(38), 1f));
+        textSizeControls.addView(textSizeLabel, new LinearLayout.LayoutParams(0, dp(40), 1f));
         TextView smallerText = navButton("ছোট −");
-        TextView currentTextSize = label(bn(lyricSizeSp), 12, MUTED, true);
+        TextView currentTextSize = label(bn(currentReaderTextSizeSp(screenWidthDp)), 12, MUTED, true);
         currentTextSize.setGravity(Gravity.CENTER);
         TextView largerText = navButton("বড় +");
-        textSizeControls.addView(smallerText, new LinearLayout.LayoutParams(dp(64), dp(38)));
-        textSizeControls.addView(currentTextSize, new LinearLayout.LayoutParams(dp(36), dp(38)));
-        textSizeControls.addView(largerText, new LinearLayout.LayoutParams(dp(64), dp(38)));
+        textSizeControls.addView(smallerText, new LinearLayout.LayoutParams(dp(64), dp(40)));
+        textSizeControls.addView(currentTextSize, new LinearLayout.LayoutParams(dp(36), dp(40)));
+        textSizeControls.addView(largerText, new LinearLayout.LayoutParams(dp(64), dp(40)));
         smallerText.setContentDescription("গানের লেখা ছোট করুন");
         largerText.setContentDescription("গানের লেখা বড় করুন");
-        smallerText.setOnClickListener(v -> changeReaderTextSize(song, -1));
-        largerText.setOnClickListener(v -> changeReaderTextSize(song, 1));
-        body.addView(textSizeControls, matchWrap());
-        addSpace(body, 6);
+        smallerText.setOnClickListener(v -> changeReaderTextSize(currentSong, -1));
+        largerText.setOnClickListener(v -> changeReaderTextSize(currentSong, 1));
+        page.addView(textSizeControls, matchWrap());
+
+        readerList = new ReaderListView(this);
+        readerList.setDivider(null);
+        readerList.setDividerHeight(dp(6));
+        readerList.setSelector(android.R.color.transparent);
+        readerList.setCacheColorHint(BG);
+        readerList.setClipToPadding(false);
+        readerList.setPadding(0, dp(6), 0, dp(14));
+        readerBookSongs = new ArrayList<>(songs);
+        Collections.sort(readerBookSongs, (a, b) -> {
+            if (a.volume != b.volume) return Integer.compare(a.volume, b.volume);
+            return Integer.compare(a.number, b.number);
+        });
+        readerAdapter = new SongReaderAdapter();
+        readerList.setAdapter(readerAdapter);
+        readerList.setOnScrollListener(new android.widget.AbsListView.OnScrollListener() {
+            @Override public void onScrollStateChanged(android.widget.AbsListView view, int state) { }
+            @Override public void onScroll(android.widget.AbsListView view, int firstVisibleItem,
+                                           int visibleItemCount, int totalItemCount) {
+                updateReaderSongFromScroll(firstVisibleItem);
+            }
+        });
+        page.addView(readerList, new LinearLayout.LayoutParams(-1, 0, 1f));
+        int initialPosition = readerPositionFor(song);
+        int savedOffset = Math.max(0, prefs.getInt("scroll_" + song.id, 0));
+        readerList.post(() -> {
+            readerList.setSelection(initialPosition);
+            readerList.post(() -> {
+                int firstVisible = readerList.getFirstVisiblePosition();
+                View row = readerList.getChildAt(initialPosition - firstVisible);
+                int maxOffset = row == null ? 0
+                        : Math.max(0, row.getHeight() - readerList.getHeight());
+                readerList.setSelectionFromTop(initialPosition, -Math.min(savedOffset, maxOffset));
+            });
+        });
+    }
+
+    private final class ReaderListView extends ListView {
+        ReaderListView(Context context) { super(context); }
+
+        @Override public void fling(int velocityY) {
+            // Keep one fast accidental swipe from racing through several songs.
+            int limit = dp(1500);
+            int safeVelocity = Math.max(-limit, Math.min(limit, velocityY));
+            super.fling(safeVelocity);
+        }
+    }
+
+    private final class SongReaderAdapter extends BaseAdapter {
+        @Override public int getCount() { return readerBookSongs.size(); }
+        @Override public Song getItem(int position) { return readerBookSongs.get(position); }
+        @Override public long getItemId(int position) { return position; }
+        @Override public View getView(int position, View convertView, android.view.ViewGroup parent) {
+            return createReaderSongRow(position, getItem(position), convertView);
+        }
+    }
+
+    private int readerPositionFor(Song song) {
+        for (int i = 0; i < readerBookSongs.size(); i++) {
+            if (readerBookSongs.get(i).id.equals(song.id)) return i;
+        }
+        return 0;
+    }
+
+    private View createReaderSongRow(int position, Song song, View convertView) {
+        FrameLayout outer = convertView instanceof FrameLayout
+                ? (FrameLayout) convertView : new FrameLayout(this);
+        outer.removeAllViews();
+        outer.setBackgroundColor(BG);
+        outer.setPadding(0, dp(8), 0, dp(8));
+
+        LinearLayout paper = new LinearLayout(this);
+        paper.setOrientation(LinearLayout.VERTICAL);
+        paper.setPadding(dp(18), dp(16), dp(18), dp(22));
+        paper.setBackground(roundStroke(SURFACE, BORDER, 18));
+        FrameLayout.LayoutParams paperParams = new FrameLayout.LayoutParams(
+                readerPageWidthPx, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        outer.addView(paper, paperParams);
+
+        TextView meta = label(volumeNames.get(song.volume - 1) + "  ·  গান " + bn(song.number),
+                12, GREEN, true);
+        meta.setGravity(Gravity.CENTER);
+        paper.addView(meta, matchWrap());
+        addSpace(paper, 10);
+
+        TextView title = label(song.title, 22, TEXT, true);
+        title.setGravity(Gravity.CENTER);
+        title.setLineSpacing(dp(4), 1f);
+        paper.addView(title, matchWrap());
+        if (!song.category.isEmpty()) {
+            addSpace(paper, 4);
+            TextView category = label(song.category, 13, MUTED, true);
+            category.setGravity(Gravity.RIGHT);
+            paper.addView(category, matchWrap());
+        }
+
+        addSpace(paper, 10);
+        View line = new View(this);
+        line.setBackgroundColor(BORDER);
+        LinearLayout.LayoutParams lineParams = new LinearLayout.LayoutParams(-1, dp(1));
+        lineParams.leftMargin = dp(22);
+        lineParams.rightMargin = dp(22);
+        paper.addView(line, lineParams);
+        addSpace(paper, 14);
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setGravity(Gravity.CENTER);
+        TextView favorite = readerAction(favorites.contains(song.id) ? "♥" : "♡",
+                favorites.contains(song.id) ? GREEN : TEXT, "প্রিয়");
+        TextView bookmark = readerAction(bookmarks.contains(song.id) ? "▣" : "▢",
+                bookmarks.contains(song.id) ? GREEN : TEXT, "বুকমার্ক");
+        actions.addView(favorite, new LinearLayout.LayoutParams(0, dp(56), 1f));
+        LinearLayout.LayoutParams bookmarkParams = new LinearLayout.LayoutParams(0, dp(56), 1f);
+        bookmarkParams.leftMargin = dp(8);
+        actions.addView(bookmark, bookmarkParams);
+        paper.addView(actions);
+        favorite.setOnClickListener(v -> {
+            toggleSet(favorites, song.id, "favorites");
+            favorite.setText(favorites.contains(song.id) ? "♥\nপ্রিয়" : "♡\nপ্রিয়");
+            favorite.setTextColor(favorites.contains(song.id) ? GREEN : TEXT);
+        });
+        bookmark.setOnClickListener(v -> {
+            toggleSet(bookmarks, song.id, "bookmarks");
+            bookmark.setText(bookmarks.contains(song.id) ? "▣\nবুকমার্ক" : "▢\nবুকমার্ক");
+            bookmark.setTextColor(bookmarks.contains(song.id) ? GREEN : TEXT);
+        });
+
+        addSpace(paper, 12);
+        addReaderLyrics(paper, song, readerTextMeasurePx,
+                effectiveReaderTextSizeSp(getResources().getDisplayMetrics().widthPixels
+                        / getResources().getDisplayMetrics().density));
+
+        addSpace(paper, 20);
+        LinearLayout navigation = new LinearLayout(this);
+        navigation.setOrientation(LinearLayout.HORIZONTAL);
+        Song previous = readerSongAt(position - 1);
+        Song next = readerSongAt(position + 1);
+        TextView previousButton = navButton("‹  আগের গান");
+        TextView nextButton = navButton("পরের গান  ›");
+        navigation.addView(previousButton, new LinearLayout.LayoutParams(0, dp(48), 1f));
+        LinearLayout.LayoutParams nextParams = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        nextParams.leftMargin = dp(8);
+        navigation.addView(nextButton, nextParams);
+        previousButton.setEnabled(previous != null);
+        nextButton.setEnabled(next != null);
+        previousButton.setAlpha(previous == null ? 0.4f : 1f);
+        nextButton.setAlpha(next == null ? 0.4f : 1f);
+        previousButton.setOnClickListener(v -> { if (previous != null) scrollToReaderSong(previous); });
+        nextButton.setOnClickListener(v -> { if (next != null) scrollToReaderSong(next); });
+        paper.addView(navigation);
+
+        TextView scrollHint = label("নিচে স্ক্রল করলে পরের গান পড়তে পারবেন", 11, MUTED, false);
+        scrollHint.setGravity(Gravity.CENTER);
+        scrollHint.setPadding(0, dp(12), 0, 0);
+        paper.addView(scrollHint, matchWrap());
+        return outer;
+    }
+
+    private Song readerSongAt(int position) {
+        return position < 0 || position >= readerBookSongs.size()
+                ? null : readerBookSongs.get(position);
+    }
+
+    private void scrollToReaderSong(Song song) {
+        if (readerList == null || song == null) return;
+        saveReaderPosition();
+        int position = readerPositionFor(song);
+        int offset = Math.max(0, prefs.getInt("scroll_" + song.id, 0));
+        readerList.smoothScrollToPositionFromTop(position, -offset, 260);
+    }
+
+    private void updateReaderSongFromScroll(int firstVisibleItem) {
+        if (readerList == null || firstVisibleItem < 0
+                || firstVisibleItem >= readerBookSongs.size()) return;
+        Song visible = readerBookSongs.get(firstVisibleItem);
+        saveVisibleReaderOffset(firstVisibleItem, visible);
+        if (currentSong == null || !currentSong.id.equals(visible.id)) {
+            saveReaderPosition();
+            currentSong = visible;
+            rememberSong(visible);
+            if (readerHeaderTitle != null) readerHeaderTitle.setText("গান " + bn(visible.number));
+            if (readerHeaderSubtitle != null) {
+                readerHeaderSubtitle.setText(volumeNames.get(visible.volume - 1));
+            }
+        }
+    }
+
+    private void saveVisibleReaderOffset(int position, Song song) {
+        if (readerList == null || song == null) return;
+        int firstVisible = readerList.getFirstVisiblePosition();
+        View row = readerList.getChildAt(position - firstVisible);
+        if (row == null) return;
+        int offset = Math.max(0, -row.getTop());
+        long now = SystemClock.uptimeMillis();
+        boolean songChanged = !song.id.equals(lastReaderOffsetSongId);
+        if (!songChanged && Math.abs(offset - lastReaderOffsetPx) < dp(24)
+                && now - lastReaderOffsetWriteMs < 800L) return;
+        prefs.edit().putInt("scroll_" + song.id, offset).apply();
+        lastReaderOffsetSongId = song.id;
+        lastReaderOffsetPx = offset;
+        lastReaderOffsetWriteMs = now;
+    }
+
+    private void addReaderLyrics(LinearLayout parent, Song song, int textMeasure, int lyricSizeSp) {
+        final float wordTextWidthPt = 671.8f;
         for (LyricBlock block : song.lyricBlocks) {
             String blockText = song.lyrics.substring(block.startOffset, block.endOffset);
             TextView lyricLine = label(blockText, lyricSizeSp, TEXT, false);
@@ -1571,13 +1874,12 @@ public class MainActivity extends Activity {
                     : block.alignment == 2 ? Gravity.RIGHT : Gravity.LEFT;
             lyricLine.setGravity(gravity);
             if (Build.VERSION.SDK_INT >= 23) {
-                lyricLine.setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY);
+                lyricLine.setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE);
                 lyricLine.setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE);
             }
             if (block.alignment == 3 && Build.VERSION.SDK_INT >= 26) {
                 lyricLine.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD);
             }
-            // Word paragraphs use single line spacing; avoid adding artificial vertical gaps.
             lyricLine.setLineSpacing(0f, 1.0f);
             int leftIndent = responsiveWordMeasure(block.leftIndentPt, textMeasure, wordTextWidthPt);
             int firstIndent = Math.max(0, leftIndent + responsiveWordMeasure(
@@ -1601,55 +1903,35 @@ public class MainActivity extends Activity {
                     responsiveWordMeasure(block.rightIndentPt, textMeasure, wordTextWidthPt), 0);
             lyricLine.setTextIsSelectable(true);
             LinearLayout.LayoutParams lyricParams = matchWrap();
-            lyricParams.topMargin = responsiveWordMeasure(block.spaceBeforePt, textMeasure, wordTextWidthPt);
-            lyricParams.bottomMargin = responsiveWordMeasure(block.spaceAfterPt, textMeasure, wordTextWidthPt);
-            body.addView(lyricLine, lyricParams);
+            lyricParams.topMargin = responsiveWordMeasure(
+                    block.spaceBeforePt, textMeasure, wordTextWidthPt);
+            lyricParams.bottomMargin = responsiveWordMeasure(
+                    block.spaceAfterPt, textMeasure, wordTextWidthPt);
+            parent.addView(lyricLine, lyricParams);
         }
-        addSpace(body,26);
-        LinearLayout nav=new LinearLayout(this);nav.setOrientation(LinearLayout.HORIZONTAL);
-        Song previous=byPosition(song.volume,song.number-1); if(previous==null && song.volume>1) previous=byPosition(song.volume-1,countInVolume(song.volume-1));
-        Song next=byPosition(song.volume,song.number+1); if(next==null && song.volume<3) next=byPosition(song.volume+1,1);
-        TextView prev=navButton("‹  আগের গান"); TextView nxt=navButton("পরের গান  ›");
-        nav.addView(prev,new LinearLayout.LayoutParams(0,dp(52),1f));LinearLayout.LayoutParams nextLp=new LinearLayout.LayoutParams(0,dp(52),1f);nextLp.leftMargin=dp(8);nav.addView(nxt,nextLp);
-        prev.setEnabled(previous!=null);nxt.setEnabled(next!=null);prev.setAlpha(previous==null?0.4f:1f);nxt.setAlpha(next==null?0.4f:1f);
-        Song pSong=previous,nSong=next;
-        prev.setOnClickListener(v->{if(pSong!=null)openSong(pSong);});nxt.setOnClickListener(v->{if(nSong!=null)openSong(nSong);});
-        body.addView(nav);
-
-        LinearLayout tools = new LinearLayout(this);
-        tools.setOrientation(LinearLayout.HORIZONTAL);
-        TextView find = navButton("⌕  গান খুঁজুন");
-        TextView toTop = navButton("↑  উপরে যান");
-        tools.addView(find, new LinearLayout.LayoutParams(0,dp(46),1f));
-        LinearLayout.LayoutParams topLp = new LinearLayout.LayoutParams(0,dp(46),1f);
-        topLp.leftMargin = dp(8);
-        tools.addView(toTop, topLp);
-        addSpace(body, 18);
-        body.addView(tools);
-        find.setOnClickListener(v -> startOfflineVoice(null));
-        toTop.setOnClickListener(v->readerScroll.smoothScrollTo(0,0));
-        readerScroll.post(() -> {
-            if (song.id.equals(prefs.getString("last_song", ""))) {
-                int saved = Math.max(0, prefs.getInt("scroll_" + song.id, 0));
-                readerScroll.scrollTo(0, saved);
-            }
-        });
     }
 
     private int defaultReaderTextSizeSp(float screenWidthDp) {
-        return screenWidthDp < 360f ? 17 : (screenWidthDp < 600f ? 18 : 20);
+        return 16;
     }
 
     private int currentReaderTextSizeSp(float screenWidthDp) {
         int fallback = defaultReaderTextSizeSp(screenWidthDp);
-        return Math.max(15, Math.min(28, prefs.getInt("reader_text_size_sp", fallback)));
+        return Math.max(8, Math.min(28, prefs.getInt("reader_text_size_sp", fallback)));
+    }
+
+    private int effectiveReaderTextSizeSp(float screenWidthDp) {
+        int preferred = currentReaderTextSizeSp(screenWidthDp);
+        float standardTextWidth = dp(300);
+        float widthScale = standardTextWidth <= 0 ? 1f : readerTextMeasurePx / standardTextWidth;
+        return Math.max(8, Math.round(preferred * widthScale));
     }
 
     private void changeReaderTextSize(Song song, int delta) {
         float density = getResources().getDisplayMetrics().density;
         float screenWidthDp = getResources().getDisplayMetrics().widthPixels / density;
         int current = currentReaderTextSizeSp(screenWidthDp);
-        int updated = Math.max(15, Math.min(28, current + delta));
+        int updated = Math.max(8, Math.min(28, current + delta));
         if (updated == current) return;
         saveReaderPosition();
         prefs.edit().putInt("reader_text_size_sp", updated).apply();
@@ -1723,6 +2005,7 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, MIC_PERMISSION);
             return;
         }
+        cancelVoicePrewarmSchedule();
         cancelVoiceSession();
         voiceSessionCompleted = false;
         voiceListeningStarted = false;
@@ -1830,6 +2113,7 @@ public class MainActivity extends Activity {
                     .putExtra(VoiceRecognitionService.EXTRA_RECEIVER, voiceReceiver);
             startService(startIntent);
             voiceServiceStarted = true;
+            voiceModelServiceActive = true;
             voiceServiceConnection = new ServiceConnection() {
                 @Override public void onServiceConnected(ComponentName name, IBinder binder) {
                     // A short-lived binding keeps the active ASR worker attached
@@ -1871,6 +2155,7 @@ public class MainActivity extends Activity {
                 command.putExtra(VoiceRecognitionService.EXTRA_RECEIVER, voiceReceiver);
             }
             startService(command);
+            voiceModelServiceActive = true;
         } catch (Exception error) {
             finishVoiceDialog();
             Toast.makeText(this, "ভয়েস সার্ভিস পাওয়া যাচ্ছে না। আবার চেষ্টা করুন।",
@@ -1919,11 +2204,59 @@ public class MainActivity extends Activity {
         voiceListeningStarted = false;
     }
 
+    private boolean hasRoomForVoicePrewarm() {
+        ActivityManager manager = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        if (manager == null) return false;
+        ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
+        manager.getMemoryInfo(memory);
+        long minimumRam = 3L * 1024L * 1024L * 1024L;
+        return memory.totalMem >= minimumRam && memory.availMem >= 256L * 1024L * 1024L;
+    }
+
+    private void scheduleOfflineVoicePrewarm() {
+        if (!searchIndexReady || voiceModelServiceActive || voiceServiceStarted
+                || voicePrewarmTask != null || !hasRoomForVoicePrewarm()) return;
+        voicePrewarmTask = () -> {
+            voicePrewarmTask = null;
+            if (isFinishing() || isDestroyed() || voiceServiceStarted) return;
+            try {
+                startService(new Intent(this, VoiceRecognitionService.class)
+                        .setAction(VoiceRecognitionService.ACTION_PREWARM));
+                voiceModelServiceActive = true;
+            } catch (Exception error) {
+                Log.w("AshkeShadekVoice", "Could not prewarm bundled voice model", error);
+            }
+        };
+        mainHandler.postDelayed(voicePrewarmTask, 2500L);
+    }
+
+    private void cancelVoicePrewarmSchedule() {
+        if (voicePrewarmTask != null) mainHandler.removeCallbacks(voicePrewarmTask);
+        voicePrewarmTask = null;
+    }
+
+    private void stopOfflineVoiceService() {
+        cancelVoicePrewarmSchedule();
+        if (voiceServiceStarted) cancelVoiceSession();
+        try { stopService(new Intent(this, VoiceRecognitionService.class)); }
+        catch (Exception error) {
+            Log.w("AshkeShadekVoice", "Could not stop voice model service", error);
+        }
+        voiceModelServiceActive = false;
+    }
+
     /** Shows the strongest three live catalogue candidates while recognition continues. */
     private void renderVoiceCandidates(String transcript) {
         if (voiceCandidates == null) return;
         String query = transcript == null ? "" : transcript.trim();
         if (query.isEmpty() || query.equals(lastVoiceCandidateQuery)) return;
+        latestVoiceTranscript = query;
+        if (!searchIndexReady) {
+            if (voiceCandidates.getChildCount() == 0) {
+                voiceCandidates.addView(label("গানের খোঁজ প্রস্তুত হচ্ছে…", 12, MUTED, false));
+            }
+            return;
+        }
         long now = System.currentTimeMillis();
         if (now - lastVoiceCandidateUpdateMs < 180L) return;
         lastVoiceCandidateQuery = query;
@@ -2066,17 +2399,17 @@ public class MainActivity extends Activity {
             if (q.contains("পরেরগান") || q.contains("পরবর্তীগান") || q.contains("nextsong")) {
                 Song next = byPosition(currentSong.volume, currentSong.number + 1);
                 if (next == null && currentSong.volume < 3) next = byPosition(currentSong.volume + 1, 1);
-                if (next != null) openSong(next);
+                if (next != null) scrollToReaderSong(next);
                 return true;
             }
             if (q.contains("আগেরগান") || q.contains("পূর্বেরগান") || q.contains("previoussong")) {
                 Song prev = byPosition(currentSong.volume, currentSong.number - 1);
                 if (prev == null && currentSong.volume > 1) prev = byPosition(currentSong.volume - 1, countInVolume(currentSong.volume - 1));
-                if (prev != null) openSong(prev);
+                if (prev != null) scrollToReaderSong(prev);
                 return true;
             }
             if (q.contains("উপরে") || q.contains("শুরুতে") || q.contains("গোড়ায়যাও")) {
-                if (readerScroll != null) readerScroll.smoothScrollTo(0, 0);
+                if (readerList != null) readerList.smoothScrollToPosition(0);
                 return true;
             }
         }
@@ -2138,7 +2471,7 @@ public class MainActivity extends Activity {
     private LinearLayout bottomNav(){
         LinearLayout bar=new LinearLayout(this);bar.setBackgroundColor(SURFACE);bar.setGravity(Gravity.CENTER);bar.setOrientation(LinearLayout.HORIZONTAL);bar.setPadding(dp(4),dp(6),dp(4),dp(6));
         String[] labels={"⌂\nহোম","☷\nসূচী","♡\nপ্রিয়","▣\nবুকমার্ক"};String[] screens={"home","index","favorites","bookmarks"};
-        for(int i=0;i<labels.length;i++){final String screen=screens[i];TextView item=label(labels[i],12,screen.equals(currentScreen)?GREEN:MUTED,screen.equals(currentScreen));item.setGravity(Gravity.CENTER);bar.addView(item,new LinearLayout.LayoutParams(0,-1,1f));item.setOnClickListener(v->{if(screen.equals("home"))renderHome();else if(screen.equals("index"))renderIndex();else renderSaved(screen);});}
+        for(int i=0;i<labels.length;i++){final String screen=screens[i];TextView item=label(labels[i],12,screen.equals(currentScreen)?GREEN:MUTED,screen.equals(currentScreen));item.setGravity(Gravity.CENTER);bar.addView(item,new LinearLayout.LayoutParams(0,-1,1f));item.setOnClickListener(v->{if(screen.equals("home")){homeHasInteracted=true;renderHome();}else if(!catalogReady){Toast.makeText(this,"গানের তালিকা প্রস্তুত হচ্ছে…",Toast.LENGTH_SHORT).show();}else if(screen.equals("index"))renderIndex();else renderSaved(screen);});}
         return bar;
     }
 
@@ -2154,7 +2487,13 @@ public class MainActivity extends Activity {
         micParams.leftMargin = dp(8);
         row.addView(mic, micParams);
         mic.setContentDescription("মাইক্রোফোনে গান খুঁজুন");
-        mic.setOnClickListener(v -> startOfflineVoice(search));
+        mic.setOnClickListener(v -> {
+            if (!catalogReady) {
+                Toast.makeText(this, "গানের তালিকা প্রস্তুত হচ্ছে…", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            startOfflineVoice(search);
+        });
         return row;
     }
     private EditText searchField(String hint){EditText e=new EditText(this);e.setSingleLine(true);e.setTextSize(15);e.setTextColor(TEXT);e.setHintTextColor(MUTED);e.setHint(hint);e.setPadding(dp(15),0,dp(15),0);e.setBackground(roundStroke(SURFACE,BORDER,15));e.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);return e;}
@@ -2209,8 +2548,17 @@ public class MainActivity extends Activity {
     }
 
     private void saveReaderPosition() {
-        if (currentSong != null && readerScroll != null) {
-            prefs.edit().putInt("scroll_" + currentSong.id, Math.max(0, readerScroll.getScrollY())).apply();
+        if (currentSong != null && readerList != null) {
+            int position = readerPositionFor(currentSong);
+            int firstVisible = readerList.getFirstVisiblePosition();
+            View row = readerList.getChildAt(position - firstVisible);
+            if (row != null) {
+                int offset = Math.max(0, -row.getTop());
+                prefs.edit().putInt("scroll_" + currentSong.id, offset).apply();
+                lastReaderOffsetSongId = currentSong.id;
+                lastReaderOffsetPx = offset;
+                lastReaderOffsetWriteMs = SystemClock.uptimeMillis();
+            }
         }
     }
 
@@ -2218,6 +2566,11 @@ public class MainActivity extends Activity {
         saveReaderPosition();
         if (voiceServiceStarted) cancelVoiceSession();
         super.onPause();
+    }
+
+    @Override protected void onStart() {
+        super.onStart();
+        scheduleOfflineVoicePrewarm();
     }
 
     private void enforceStorageBudget() {
@@ -2283,7 +2636,7 @@ public class MainActivity extends Activity {
     @Override public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         logMemory("trim-level-" + level);
-        if (level >= TRIM_MEMORY_UI_HIDDEN && voiceServiceStarted) cancelVoiceSession();
+        if (level >= TRIM_MEMORY_UI_HIDDEN) stopOfflineVoiceService();
         if (level == TRIM_MEMORY_UI_HIDDEN || level >= TRIM_MEMORY_BACKGROUND) {
             // Only throw away reconstructible temporary files; song data and
             // user state live in assets/preferences and are never cache-only.
@@ -2292,18 +2645,18 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onStop() {
-        if (voiceServiceStarted) cancelVoiceSession();
+        stopOfflineVoiceService();
         super.onStop();
     }
 
     @Override public void onLowMemory() {
         super.onLowMemory();
         logMemory("system-low-memory");
-        if (voiceServiceStarted) cancelVoiceSession();
+        stopOfflineVoiceService();
         deleteDirectoryContents(getCacheDir());
     }
 
-    @Override protected void onDestroy(){cancelVoiceSession();super.onDestroy();}
+    @Override protected void onDestroy(){stopOfflineVoiceService();super.onDestroy();}
 
     private static class SearchQuery {
         final String normalized, modern, phonetic;

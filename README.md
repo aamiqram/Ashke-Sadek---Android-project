@@ -27,7 +27,7 @@ Minimum Android version is 5.0 (API 21); the app targets API 36 and is packaged 
 | Browse | Open the first, second or third volume; browse the song index; jump to a song by number; move to the previous or next song. |
 | Search | Get live typed results from song titles, first lines and lyrics. Search understands older/newer Bengali spellings, phonetic forms, partial words and limited typing errors. Long result lists load in batches. |
 | Voice | Tap the microphone once. The app begins listening automatically when its offline model is ready and shows likely songs while recognition continues. Suggestions include the volume, song number, title and a lyric excerpt. |
-| Read | Read the original Bengali text with paragraph alignment, indentation, emphasis and spacing preserved. Text wraps to the phone width, and the reader has small/big text controls. |
+| Read | Read the original Bengali text with paragraph alignment, indentation, emphasis and spacing preserved. Songs flow vertically in book order; use the small/big text controls to adjust the text. |
 | Find another song | Open search from inside a song, without returning to the home screen. |
 | Personal library | Save favourites and bookmarks, see recent songs, and return to the last song and its saved scroll position. |
 | Backup and restore | Export or restore favourites, bookmarks, recent songs, last-read song and per-song reading positions as JSON. |
@@ -40,7 +40,7 @@ The home screen shows the three volumes and quick access to favourites, bookmark
 
 Voice search uses a bundled Bengali streaming speech-recognition model and the sherpa-onnx Android runtime. Recognition and matching happen on the device. Live suggestions require multiple words or a multiword lyric phrase, and matching checks lyric word order to reduce results from ordinary conversation. A candidate stays visible while recognition continues, so a later transcript fragment does not immediately erase it.
 
-The speech model is loaded for each voice-search session and released afterward to keep its native memory out of the reader process while the user reads. Model startup has taken about 15–20 seconds on some tested phones; latency varies with the device and memory conditions.
+The speech model stays in the app package and never needs a first-use download. On phones with at least 3 GB of RAM and enough free memory, the app starts warming it in a separate process after the catalogue and search index are ready. The loaded model can serve another search for up to two minutes; it is released when the app goes into the background, Android reports low memory, or the idle timer expires. Lower-memory phones load it when voice search is first opened, so startup can still take longer there.
 
 The int8 model package contains an encoder of about 26.2 MB, a 2.1 MB decoder, a 0.26 MB joiner and roughly 6 KB of tokens. Its published FLEURS Bengali word-error rate is not a measure of accuracy on noisy singing or song identification.
 
@@ -58,7 +58,7 @@ The int8 model package contains an encoder of about 26.2 MB, a 2.1 MB decoder, a
 
 The bundled catalogue contains **615 songs**: 82 in the first volume, 289 in the second and 244 in the third. It preserves all 6,246 source Word lyric paragraphs. Lyrics and paragraph formatting are read from the original Word document; the corrected copy supplies song titles and index order. The catalogue-generation script reads both documents and never edits either one. Duplicate candidates remain available in the catalogue data.
 
-The reader maps Word alignment, indents and paragraph spacing to the available screen width. The source document mostly uses the SutonnyOMJ font, which is not bundled in the app; Android uses its Bengali system font instead. As a result, line breaks can differ from Word or PDF even when paragraph formatting is preserved. Readers can adjust text size inside the app.
+The reader maps Word alignment, indents and paragraph spacing to a fixed-width book column on typical phones, then scrolls through songs continuously. On narrower screens, the text scales to fit the available page. The source document mostly uses the SutonnyOMJ font, which is not bundled in the app; Android uses its Bengali system font instead. This makes line wrapping more consistent across common phone widths, but line breaks can still differ from Word or PDF and between Android system fonts. Readers can adjust text size inside the app.
 
 Integrity reference values:
 
@@ -70,7 +70,7 @@ Integrity reference values:
 
 The catalogue and search index are prepared once during startup. Search updates reuse that index rather than rebuilding normalized lyrics on every keystroke. To keep repeated matching fast, the app retains derived normalized, spelling-variant, phonetic and word-set search forms in addition to the single canonical lyric text for each song.
 
-Voice recognition runs in a private `:voice` process with one inference thread. It is started only for a voice-search session and stopped afterward. Android can still terminate that process under memory pressure; the reader remains separate and reports an interrupted voice session.
+Voice recognition runs in a private `:voice` process with one inference thread. On suitable phones, that process can prepare the bundled model in the background and keep it warm briefly between searches. It is stopped when the app is backgrounded or memory is low. Android can still terminate it under memory pressure; the reader remains separate and reports an interrupted voice session.
 
 The app writes local performance and memory events to the `AshkeMemory` log tag. On a connected test phone, inspect memory with:
 
