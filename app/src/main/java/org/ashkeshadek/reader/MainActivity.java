@@ -889,11 +889,16 @@ public class MainActivity extends Activity {
 
     private SearchQuery prepareSearchQuery(String value) {
         String original = value == null ? "" : value;
-        List<String> terms = new ArrayList<>();
+        LinkedHashSet<String> uniqueTerms = new LinkedHashSet<>();
         Matcher matcher = WORD_PATTERN.matcher(original);
         while (matcher.find()) {
             String token = normalize(matcher.group());
-            if (token.length() >= 2) terms.add(token);
+            if (token.length() >= 2) uniqueTerms.add(token);
+        }
+        List<SearchTerm> terms = new ArrayList<>(uniqueTerms.size());
+        for (String token : uniqueTerms) {
+            String modern = normalize(modernizeOldBengali(token));
+            terms.add(new SearchTerm(token, modern, phoneticNormalize(token)));
         }
         return new SearchQuery(normalize(original),
                 normalize(modernizeOldBengali(original)),
@@ -901,34 +906,62 @@ public class MainActivity extends Activity {
     }
 
     private int scoreSongMatch(Song song, SearchQuery query) {
-        if (query.normalized.isEmpty()) return 0;
+        return scoreSongMatch(song, query, false);
+    }
+
+    /**
+     * Shared catalogue matcher for typed and spoken input. Query variants are
+     * prepared once; the voice path applies stricter evidence rules so normal
+     * conversation and short ASR fragments do not produce confident song hits.
+     */
+    private int scoreSongMatch(Song song, SearchQuery query, boolean voiceInput) {
+        if (query.normalized.length() < (voiceInput ? 3 : 1)) return 0;
         SearchDocument doc = searchIndex.get(song.id);
         if (doc == null) return 0;
-        if (doc.title.contains(query.normalized)) return 2200 + query.normalized.length();
-        if (doc.normalized.contains(query.normalized)) return 1600 + query.normalized.length();
-        if (!query.modern.equals(query.normalized) && doc.modern.contains(query.modern))
-            return 1350 + query.modern.length();
-        if (query.phonetic.length() >= 3 && doc.phonetic.contains(query.phonetic))
-            return 1120 + query.phonetic.length();
+
+        // A short substring is not useful evidence: it creates many accidental
+        // matches while someone is speaking. Keep typed autocomplete permissive.
+        int phraseMinimum = voiceInput ? 5 : 3;
+        if (query.normalized.length() >= phraseMinimum) {
+            if (doc.title.contains(query.normalized)) return 2400 + query.normalized.length();
+            if (doc.normalized.contains(query.normalized)) return 1800 + query.normalized.length();
+            if (!query.modern.equals(query.normalized) && doc.modern.contains(query.modern))
+                return 1550 + query.modern.length();
+            if (query.phonetic.length() >= phraseMinimum && doc.phonetic.contains(query.phonetic))
+                return 1300 + query.phonetic.length();
+        }
         if (query.terms.isEmpty()) return 0;
 
         int exact = 0, modern = 0, phonetic = 0, prefix = 0, fuzzy = 0;
-        for (String token : query.terms) {
-            String modernToken = normalize(modernizeOldBengali(token));
-            String soundToken = phoneticNormalize(token);
-            if (doc.words.contains(token)) exact++;
-            else if (doc.modernWords.contains(token) || doc.words.contains(modernToken)) modern++;
-            else if (doc.phoneticWords.contains(soundToken)) phonetic++;
-            else if (hasPrefixMatch(token, doc.words, doc.modernWords)) prefix++;
-            else if (token.length() >= 4 && hasOneEditMatch(token, doc.words)) fuzzy++;
+        for (SearchTerm term : query.terms) {
+            if (doc.words.contains(term.original)) exact++;
+            else if (doc.modernWords.contains(term.original)
+                    || doc.words.contains(term.modern)) modern++;
+            else if (doc.phoneticWords.contains(term.phonetic)) phonetic++;
+            else if (!voiceInput && term.original.length() >= 2
+                    && hasPrefixMatch(term.original, doc.words, doc.modernWords)) prefix++;
+            else if (!voiceInput && term.original.length() >= 4
+                    && hasOneEditMatch(term.original, doc.words)) fuzzy++;
         }
+
         int matched = exact + modern + phonetic + prefix + fuzzy;
         if (matched == 0) return 0;
         int coverage = matched * 100 / query.terms.size();
-        int score = exact * 110 + modern * 88 + phonetic * 72 + prefix * 58 + fuzzy * 42 + coverage;
-        if (query.terms.size() >= 2 && matched == query.terms.size()) score += 90;
-        if (query.terms.size() >= 3 && matched < 2) return 0;
-        if (query.terms.size() >= 4 && coverage < 35) return 0;
+
+        // Voice suggestions need corroboration from multiple recognized words.
+        // A single long phrase can still qualify through the phrase checks above.
+        if (voiceInput) {
+            int required = query.terms.size() == 1 ? 2
+                    : Math.max(2, (query.terms.size() * 60 + 99) / 100);
+            if (matched < required) return 0;
+        } else if (query.terms.size() >= 3 && matched < 2) {
+            return 0;
+        }
+
+        int score = exact * 125 + modern * 105 + phonetic * 82
+                + prefix * 54 + fuzzy * 38 + coverage;
+        if (query.terms.size() >= 2 && matched == query.terms.size()) score += 100;
+        if (coverage == 100) score += 25;
         return score;
     }
 
@@ -1368,7 +1401,7 @@ public class MainActivity extends Activity {
         java.util.Map<String, Integer> scores = new java.util.HashMap<>();
         SearchQuery preparedQuery = prepareSearchQuery(query);
         for (Song song : songs) {
-            int score = scoreSongMatch(song, preparedQuery);
+            int score = scoreSongMatch(song, preparedQuery, true);
             if (score > 0) { matches.add(song); scores.put(song.id, score); }
         }
         Collections.sort(matches, (x, y) -> {
@@ -1664,10 +1697,20 @@ public class MainActivity extends Activity {
 
     private static class SearchQuery {
         final String normalized, modern, phonetic;
-        final List<String> terms;
-        SearchQuery(String normalized, String modern, String phonetic, List<String> terms) {
+        final List<SearchTerm> terms;
+        SearchQuery(String normalized, String modern, String phonetic, List<SearchTerm> terms) {
             this.normalized = normalized; this.modern = modern;
             this.phonetic = phonetic; this.terms = terms;
+        }
+    }
+
+    /** Per-token forms are calculated once per keystroke/transcript, not per song. */
+    private static class SearchTerm {
+        final String original, modern, phonetic;
+        SearchTerm(String original, String modern, String phonetic) {
+            this.original = original;
+            this.modern = modern;
+            this.phonetic = phonetic;
         }
     }
 
