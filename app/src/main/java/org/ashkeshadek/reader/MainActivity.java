@@ -950,10 +950,20 @@ public class MainActivity extends Activity {
 
         // Voice suggestions need corroboration from multiple recognized words.
         // A single long phrase can still qualify through the phrase checks above.
+        int orderedMatches = 0;
         if (voiceInput) {
             int required = query.terms.size() == 1 ? 2
                     : Math.max(2, (query.terms.size() * 60 + 99) / 100);
             if (matched < required) return 0;
+
+            // Matching words anywhere in a long song is not enough. The words
+            // heard by the microphone should also occur in lyric order nearby.
+            orderedMatches = Math.max(
+                    countOrderedMatches(doc.normalized, query.terms, 0),
+                    Math.max(countOrderedMatches(doc.modern, query.terms, 1),
+                            countOrderedMatches(doc.phonetic, query.terms, 2)));
+            int requiredInOrder = Math.max(2, (query.terms.size() + 1) / 2);
+            if (orderedMatches < requiredInOrder) return 0;
         } else if (query.terms.size() >= 3 && matched < 2) {
             return 0;
         }
@@ -962,7 +972,27 @@ public class MainActivity extends Activity {
                 + prefix * 54 + fuzzy * 38 + coverage;
         if (query.terms.size() >= 2 && matched == query.terms.size()) score += 100;
         if (coverage == 100) score += 25;
+        if (voiceInput) score += orderedMatches * 35;
         return score;
+    }
+
+    /**
+     * Counts how many recognized words occur in lyric order within a short
+     * character window. Uses existing normalized strings, avoiding a second
+     * per-song token list and its memory cost on low-RAM Android devices.
+     */
+    private int countOrderedMatches(String text, List<SearchTerm> terms, int form) {
+        int cursor = 0;
+        int matched = 0;
+        for (SearchTerm term : terms) {
+            String word = form == 1 ? term.modern
+                    : form == 2 ? term.phonetic : term.original;
+            int position = text.indexOf(word, cursor);
+            if (position < 0 || position - cursor > 80) continue;
+            matched++;
+            cursor = position + word.length();
+        }
+        return matched;
     }
 
     private boolean hasPrefixMatch(String query, Set<String> original, Set<String> modern) {
