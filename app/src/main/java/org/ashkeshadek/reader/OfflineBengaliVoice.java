@@ -115,7 +115,7 @@ final class OfflineBengaliVoice {
             recognizer=new OnlineRecognizer(context.getAssets(),config);
             stream=recognizer.createStream("");
 
-            status("প্রস্তুত। শুরু করুন চাপুন, তারপর শুধু গানের লাইনটি বলুন।");
+            status("প্রস্তুত। এখন গানের একটি লাইন বলুন—মিল পাওয়া গেলে গানটি ছুঁয়ে খুলুন।");
             synchronized (this) {
                 while (!beginRequested && !stopRequested && !cancelled) wait();
             }

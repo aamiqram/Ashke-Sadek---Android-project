@@ -16,7 +16,9 @@ concurrency:
 
 jobs:
   publish:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && vars.ASHKE_STABLE_RELEASE_READY == 'true' }}
+    # A push to main or a pull-request build must never publish a user-facing APK.
+    # A maintainer must explicitly dispatch the build workflow on main to release.
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch' && vars.ASHKE_STABLE_RELEASE_READY == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository for GitHub CLI context

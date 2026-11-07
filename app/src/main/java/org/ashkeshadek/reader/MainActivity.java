@@ -19,7 +19,10 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.ResultReceiver;
 import android.os.IBinder;
+import android.os.Process;
+import android.os.SystemClock;
 import android.text.Editable;
+import android.text.InputFilter;
 import android.text.Layout;
 import android.text.SpannableString;
 import android.text.Spanned;
@@ -30,9 +33,12 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.Spinner;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -59,6 +65,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
@@ -84,6 +91,15 @@ public class MainActivity extends Activity {
     private static final int REQUEST_EXPORT_USER_DATA = 512;
     private static final int REQUEST_IMPORT_USER_DATA = 513;
     private static final String USER_DATA_BACKUP_FORMAT = "ashke-shadek-user-data";
+    private static final String FEEDBACK_OUTBOX_KEY = "feedback_outbox_v1";
+    private static final String PERFORMANCE_EVENTS_KEY = "performance_events_v1";
+    private static final String LAST_CRASH_DIAGNOSTIC_KEY = "last_crash_diagnostic_v1";
+    private static volatile boolean crashDiagnosticHandlerInstalled;
+    private static final int MAX_PENDING_FEEDBACK = 20;
+    private static final String[] FEEDBACK_CATEGORIES = {
+            "অ্যাপে সমস্যা হচ্ছে", "অ্যাপ ধীর / আটকে যাচ্ছে", "গান খুঁজে পাচ্ছি না",
+            "গানের লেখা বা সাজানো ভুল", "নতুন ফিচার বা উন্নতির পরামর্শ"
+    };
     private static final Pattern WORD_PATTERN =
             Pattern.compile("[\\p{L}\\p{M}\\p{N}]+");
     private static final Pattern NORMALIZE_SEPARATOR_PATTERN =
@@ -135,23 +151,31 @@ public class MainActivity extends Activity {
     private AlertDialog voiceDialog;
     private TextView voiceStatus;
     private LinearLayout voiceCandidates;
+    private AlertDialog songSearchDialog;
+    private EditText dialogSearchField;
+    private EditText searchBeforeDialog;
+    private final java.util.Map<String, VoiceCandidate> voiceCandidateHistory =
+            new java.util.HashMap<>();
+    private String pinnedVoiceCandidateId = "";
+    private int pinnedVoiceCandidateScore;
     private long lastVoiceCandidateUpdateMs;
     private String lastVoiceCandidateQuery = "";
     private boolean voiceSessionCompleted = false;
     private boolean voiceListeningStarted = false;
+    private boolean voiceCandidateSelected;
+    private boolean catalogReady;
+    private long launchStartedUptimeMs;
+    private long voiceSessionStartedUptimeMs;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        launchStartedUptimeMs = SystemClock.uptimeMillis();
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        installCrashDiagnosticHandler();
         favorites = new LinkedHashSet<>(prefs.getStringSet("favorites", Collections.emptySet()));
         bookmarks = new LinkedHashSet<>(prefs.getStringSet("bookmarks", Collections.emptySet()));
         lastSongId = prefs.getString("last_song", "");
         recentIds = parseRecent(prefs.getString("recent", ""));
-        loadCatalog();
-        buildSearchIndex();
-        loadEmphasis();
-        logMemory("main-after-catalog");
-        enforceStorageBudget();
         volumeNames.add("প্রথম খণ্ড");
         volumeNames.add("দ্বিতীয় খণ্ড");
         volumeNames.add("তৃতীয় খণ্ড");
@@ -161,12 +185,95 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 23) lightSystemBars |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
         if (Build.VERSION.SDK_INT >= 26) lightSystemBars |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         if (lightSystemBars != 0) getWindow().getDecorView().setSystemUiVisibility(lightSystemBars);
-        renderHome();
+        renderStartupScreen();
+        loadCatalogInBackground();
         long lastUpdateCheck = prefs.getLong("last_update_check_ms", 0L);
         if (System.currentTimeMillis() - lastUpdateCheck >= 24L * 60L * 60L * 1000L) {
-            prefs.edit().putLong("last_update_check_ms", System.currentTimeMillis()).apply();
             checkForAppUpdates(false);
         }
+    }
+
+    private void renderStartupScreen() {
+        currentScreen = "loading";
+        mount("এশকে ছাদেক", "ভান্ডারী গানের বই", false, false);
+        LinearLayout body = new LinearLayout(this);
+        body.setGravity(Gravity.CENTER);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(28), dp(24), dp(28), dp(24));
+        page.addView(body, new LinearLayout.LayoutParams(-1, -1));
+        TextView title = label("এশকে ছাদেক", 26, TEXT, true);
+        title.setGravity(Gravity.CENTER);
+        body.addView(title, matchWrap());
+        addSpace(body, 10);
+        TextView status = label("গানের বই প্রস্তুত হচ্ছে…", 15, MUTED, false);
+        status.setGravity(Gravity.CENTER);
+        status.setTag("startup-status");
+        body.addView(status, matchWrap());
+        ProgressBar progress = new ProgressBar(this);
+        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(dp(44), dp(44));
+        progressParams.topMargin = dp(20);
+        body.addView(progress, progressParams);
+    }
+
+    private void loadCatalogInBackground() {
+        catalogReady = false;
+        if (page != null && currentScreen.equals("loading")) {
+            TextView status = page.findViewWithTag("startup-status");
+            if (status != null) status.setText("গানের বই প্রস্তুত হচ্ছে…");
+        }
+        new Thread(() -> {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
+            long catalogStarted = SystemClock.uptimeMillis();
+            songs.clear();
+            searchIndex.clear();
+            boolean loaded = loadCatalog();
+            if (loaded) {
+                buildSearchIndex();
+                loadEmphasis();
+                enforceStorageBudget();
+            }
+            long catalogElapsed = SystemClock.uptimeMillis() - catalogStarted;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (!loaded) {
+                    renderCatalogLoadError();
+                    return;
+                }
+                catalogReady = true;
+                favorites = new LinkedHashSet<>(prefs.getStringSet("favorites", Collections.emptySet()));
+                bookmarks = new LinkedHashSet<>(prefs.getStringSet("bookmarks", Collections.emptySet()));
+                logMemory("main-after-catalog");
+                Log.i("AshkeStartup", "catalogReadyMs=" + catalogElapsed
+                        + " firstScreenMs=" + (SystemClock.uptimeMillis() - launchStartedUptimeMs));
+                appendPerformanceDiagnostic("catalogReadyMs=" + catalogElapsed
+                        + ", firstScreenMs=" + (SystemClock.uptimeMillis() - launchStartedUptimeMs));
+                renderHome();
+            });
+        }, "ashke-catalog-startup").start();
+    }
+
+    private void renderCatalogLoadError() {
+        currentScreen = "loading-error";
+        mount("এশকে ছাদেক", "ভান্ডারী গানের বই", false, false);
+        LinearLayout body = new LinearLayout(this);
+        body.setGravity(Gravity.CENTER);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(24), dp(24), dp(24), dp(24));
+        page.addView(body, new LinearLayout.LayoutParams(-1, -1));
+        TextView message = label("গানের বইটি খোলা যায়নি। আবার চেষ্টা করুন।", 15, TEXT, true);
+        message.setGravity(Gravity.CENTER);
+        body.addView(message, matchWrap());
+        addSpace(body, 14);
+        TextView retry = navButton("আবার চেষ্টা করুন");
+        body.addView(retry, matchHeight(50));
+        retry.setOnClickListener(v -> renderStartupScreenAndRetry());
+    }
+
+    private void renderStartupScreenAndRetry() {
+        songs.clear();
+        searchIndex.clear();
+        renderStartupScreen();
+        loadCatalogInBackground();
     }
 
     @Override protected void onResume() {
@@ -180,7 +287,7 @@ public class MainActivity extends Activity {
      * Lyrics are reconstructed directly from their canonical Word paragraphs;
      * each paragraph is stored once in Song.lyrics and represented by offsets.
      */
-    private void loadCatalog() {
+    private boolean loadCatalog() {
         try (InputStream input = openCatalog();
              JsonReader reader = new JsonReader(new InputStreamReader(input, "UTF-8"))) {
             boolean foundSongs = false;
@@ -200,11 +307,11 @@ public class MainActivity extends Activity {
             if (!foundSongs || songs.size() != 615) {
                 throw new IllegalStateException("Catalogue song count mismatch: " + songs.size());
             }
+            return true;
         } catch (Exception error) {
             songs.clear();
             Log.e("AshkeCatalog", "Could not stream the song catalogue.", error);
-            Toast.makeText(this, "গানের তালিকা খোলা যায়নি। অ্যাপটি পুনরায় ইনস্টল করুন।",
-                    Toast.LENGTH_LONG).show();
+            return false;
         }
     }
 
@@ -448,17 +555,9 @@ public class MainActivity extends Activity {
         TextView section = label("গান খুঁজুন", 18, TEXT, true);
         body.addView(section);
         addSpace(body, 10);
-        LinearLayout searchRow = new LinearLayout(this);
-        searchRow.setOrientation(LinearLayout.HORIZONTAL);
-        searchRow.setGravity(Gravity.CENTER_VERTICAL);
         EditText search = searchField("গানের নাম বা গানের কোনো লাইন লিখুন");
         activeSearch = search;
-        searchRow.addView(search, new LinearLayout.LayoutParams(0, dp(52), 1f));
-        TextView mic = actionButton("🎙", "ভয়েস");
-        LinearLayout.LayoutParams micLp = new LinearLayout.LayoutParams(dp(66), dp(52)); micLp.leftMargin = dp(8);
-        searchRow.addView(mic, micLp);
-        mic.setOnClickListener(v -> startOfflineVoice(search));
-        body.addView(searchRow);
+        body.addView(searchInputRow(search), matchWrap());
         LinearLayout results = new LinearLayout(this); results.setOrientation(LinearLayout.VERTICAL);
         body.addView(results);
         search.addTextChangedListener(watcher(text -> renderSearchResults(results, text, 0)));
@@ -519,6 +618,289 @@ public class MainActivity extends Activity {
         backupCard.addView(label("›", 24, GREEN, true));
         backupCard.setOnClickListener(v -> showUserDataBackupOptions());
         body.addView(backupCard, matchWrap());
+
+        addSpace(body, 8);
+        LinearLayout feedbackCard = cardRow();
+        feedbackCard.addView(label("✎", 23, GREEN, true),
+                new LinearLayout.LayoutParams(dp(42), dp(42)));
+        LinearLayout feedbackInfo = new LinearLayout(this);
+        feedbackInfo.setOrientation(LinearLayout.VERTICAL);
+        feedbackInfo.addView(label("সমস্যা জানান / মতামত দিন", 14, TEXT, true));
+        int pendingReports = loadPendingFeedbackReports().length();
+        feedbackInfo.addView(label(pendingReports == 0 ? "সমস্যা, ধীরগতি বা পরামর্শ" :
+                bn(pendingReports) + "টি রিপোর্ট এই ফোনে রাখা আছে", 11, MUTED, false));
+        feedbackCard.addView(feedbackInfo, new LinearLayout.LayoutParams(0, -2, 1f));
+        feedbackCard.addView(label("›", 24, GREEN, true));
+        feedbackCard.setOnClickListener(v -> renderFeedbackForm());
+        body.addView(feedbackCard, matchWrap());
+    }
+
+    private void renderFeedbackForm() {
+        currentScreen = "feedback";
+        mount("সমস্যা জানান / মতামত দিন", "আপনার অভিজ্ঞতা দিয়ে অ্যাপ উন্নত করুন", true, true);
+        ScrollView scroll = pageScroll();
+        LinearLayout body = (LinearLayout) scroll.getChildAt(0);
+        body.setPadding(dp(18), dp(8), dp(18), dp(24));
+        TextView explanation = label("রিপোর্ট এখন শুধু এই ফোনে সংরক্ষিত হবে; কোনো সার্ভারে পাঠানো হবে না। পরে শেয়ার করতে পারবেন।",
+                13, MUTED, false);
+        body.addView(explanation, matchWrap());
+        addSpace(body, 14);
+        body.addView(label("আপনি কী জানাতে চান?", 15, TEXT, true));
+        addSpace(body, 6);
+        Spinner category = new Spinner(this);
+        android.widget.ArrayAdapter<String> adapter = new android.widget.ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, FEEDBACK_CATEGORIES);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        category.setAdapter(adapter);
+        body.addView(category, matchHeight(50));
+        addSpace(body, 12);
+        body.addView(label("সমস্যা বা পরামর্শটি লিখুন", 15, TEXT, true));
+        addSpace(body, 6);
+        EditText description = new EditText(this);
+        description.setTextSize(15);
+        description.setTextColor(TEXT);
+        description.setHintTextColor(MUTED);
+        description.setHint("কী করতে চেয়েছিলেন, কী ঘটেছে, আর কী আশা করেছিলেন—সহজ করে লিখুন।");
+        description.setGravity(Gravity.TOP | Gravity.START);
+        description.setMinLines(5);
+        description.setPadding(dp(14), dp(12), dp(14), dp(12));
+        description.setBackground(roundStroke(SURFACE, BORDER, 14));
+        description.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        description.setFilters(new InputFilter[]{new InputFilter.LengthFilter(4000)});
+        body.addView(description, matchWrap());
+        addSpace(body, 8);
+        CheckBox includeDevice = new CheckBox(this);
+        includeDevice.setText("অ্যাপের সংস্করণ ও ফোনের তথ্য যোগ করুন (ঐচ্ছিক)");
+        includeDevice.setTextColor(TEXT);
+        body.addView(includeDevice, matchWrap());
+        CheckBox includeDiagnostics = new CheckBox(this);
+        includeDiagnostics.setText("সাম্প্রতিক পারফরম্যান্স ও ক্র্যাশ তথ্য যোগ করুন (ঐচ্ছিক)");
+        includeDiagnostics.setTextColor(TEXT);
+        body.addView(includeDiagnostics, matchWrap());
+        addSpace(body, 4);
+        body.addView(label("মাইক্রোফোনের রেকর্ডিং, ব্যক্তিগত ফাইল বা পড়ার ইতিহাস যোগ হয় না। পারফরম্যান্স/ক্র্যাশ তথ্য শুধু আপনি বাছলে রিপোর্টে যুক্ত হয়।",
+                12, MUTED, false), matchWrap());
+        addSpace(body, 14);
+        TextView save = navButton("এই ফোনে রিপোর্ট রাখুন");
+        body.addView(save, matchHeight(50));
+        addSpace(body, 8);
+        TextView pending = navButton("সংরক্ষিত রিপোর্ট দেখুন ("
+                + bn(loadPendingFeedbackReports().length()) + ")");
+        body.addView(pending, matchHeight(46));
+        pending.setOnClickListener(v -> showPendingFeedbackReports());
+        save.setOnClickListener(v -> saveFeedbackReport(category.getSelectedItemPosition(),
+                description.getText().toString(), includeDevice.isChecked(),
+                includeDiagnostics.isChecked(), pending));
+    }
+
+    private void saveFeedbackReport(int categoryIndex, String description,
+                                   boolean includeDevice, boolean includeDiagnostics,
+                                   TextView pendingButton) {
+        String message = description == null ? "" : description.trim();
+        if (message.isEmpty()) {
+            Toast.makeText(this, "রিপোর্টে কী ঘটেছে তা লিখুন।", Toast.LENGTH_LONG).show();
+            return;
+        }
+        JSONArray queue = loadPendingFeedbackReports();
+        if (queue.length() >= MAX_PENDING_FEEDBACK) {
+            Toast.makeText(this, "সংরক্ষিত রিপোর্টের সীমা পূর্ণ। পুরোনো রিপোর্ট শেয়ার করে জায়গা খালি করুন।",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        JSONObject report = new JSONObject();
+        try {
+            report.put("schemaVersion", 1);
+            report.put("id", UUID.randomUUID().toString());
+            report.put("createdAtMs", System.currentTimeMillis());
+            int safeCategory = Math.max(0, Math.min(categoryIndex, FEEDBACK_CATEGORIES.length - 1));
+            report.put("category", FEEDBACK_CATEGORIES[safeCategory]);
+            report.put("description", message);
+            if (includeDevice) report.put("deviceDetails", getFeedbackDeviceDetails());
+            if (includeDiagnostics) report.put("diagnostics", loadFeedbackDiagnostics());
+            queue.put(report);
+            prefs.edit().putString(FEEDBACK_OUTBOX_KEY, queue.toString()).apply();
+        } catch (Exception error) {
+            Toast.makeText(this, "রিপোর্টটি সংরক্ষণ করা যায়নি। আবার চেষ্টা করুন।",
+                    Toast.LENGTH_LONG).show();
+            Log.w("AshkeFeedback", "Could not save local report", error);
+            return;
+        }
+        pendingButton.setText("সংরক্ষিত রিপোর্ট দেখুন (" + bn(queue.length()) + ")");
+        new AlertDialog.Builder(this)
+                .setTitle("রিপোর্ট ফোনে সংরক্ষিত")
+                .setMessage("এটি কোথাও পাঠানো হয়নি। চাইলে এখন শেয়ার করুন, অথবা পরে সংরক্ষিত রিপোর্ট থেকে খুলুন।")
+                .setNeutralButton("শেয়ার করুন", (dialog, which) -> shareFeedbackReport(report))
+                .setPositiveButton("ঠিক আছে", null)
+                .show();
+    }
+
+    private JSONArray loadPendingFeedbackReports() {
+        try {
+            return new JSONArray(prefs == null ? "[]"
+                    : prefs.getString(FEEDBACK_OUTBOX_KEY, "[]"));
+        } catch (Exception ignored) {
+            return new JSONArray();
+        }
+    }
+
+    private JSONArray loadRecentPerformanceEvents() {
+        try {
+            return new JSONArray(prefs.getString(PERFORMANCE_EVENTS_KEY, "[]"));
+        } catch (Exception ignored) {
+            return new JSONArray();
+        }
+    }
+
+    private JSONArray loadFeedbackDiagnostics() {
+        JSONArray diagnostics = loadRecentPerformanceEvents();
+        String crash = prefs.getString(LAST_CRASH_DIAGNOSTIC_KEY, "");
+        if (crash != null && !crash.isEmpty()) diagnostics.put("lastCrash: " + crash);
+        return diagnostics;
+    }
+
+    private void installCrashDiagnosticHandler() {
+        if (crashDiagnosticHandlerInstalled) return;
+        synchronized (MainActivity.class) {
+            if (crashDiagnosticHandlerInstalled) return;
+            Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+            Context applicationContext = getApplicationContext();
+            Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+                try {
+                    StringBuilder diagnostic = new StringBuilder();
+                    diagnostic.append("timeMs=").append(System.currentTimeMillis())
+                            .append(", thread=").append(thread == null ? "unknown" : thread.getName())
+                            .append(", type=").append(error == null ? "unknown" : error.getClass().getName());
+                    if (error != null) {
+                        StackTraceElement[] frames = error.getStackTrace();
+                        for (int i = 0; i < Math.min(frames.length, 24); i++) {
+                            diagnostic.append("\n at ").append(frames[i].toString());
+                        }
+                    }
+                    applicationContext.getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                            .putString(LAST_CRASH_DIAGNOSTIC_KEY, diagnostic.toString()).commit();
+                } catch (Throwable ignored) { }
+                if (previous != null) previous.uncaughtException(thread, error);
+                else {
+                    Process.killProcess(Process.myPid());
+                    System.exit(10);
+                }
+            });
+            crashDiagnosticHandlerInstalled = true;
+        }
+    }
+
+    private String getFeedbackDeviceDetails() {
+        String versionName = "unknown";
+        long versionCode = -1L;
+        try {
+            android.content.pm.PackageInfo info = getPackageManager()
+                    .getPackageInfo(getPackageName(), 0);
+            versionName = info.versionName == null ? "unknown" : info.versionName;
+            versionCode = Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
+        } catch (Exception ignored) { }
+        return "app=" + versionName + " (" + versionCode + "), android="
+                + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + "), device="
+                + Build.MANUFACTURER + " " + Build.MODEL;
+    }
+
+    private void showPendingFeedbackReports() {
+        JSONArray queue = loadPendingFeedbackReports();
+        if (queue.length() == 0) {
+            Toast.makeText(this, "এখনো কোনো রিপোর্ট সংরক্ষণ করা হয়নি।", Toast.LENGTH_LONG).show();
+            return;
+        }
+        String[] labels = new String[queue.length()];
+        for (int i = 0; i < queue.length(); i++) {
+            JSONObject report = queue.optJSONObject(i);
+            if (report == null) {
+                labels[i] = "অসম্পূর্ণ রিপোর্ট";
+                continue;
+            }
+            String summary = report.optString("description", "").replace('\n', ' ').trim();
+            if (summary.length() > 70) summary = summary.substring(0, 67) + "…";
+            labels[i] = report.optString("category", "রিপোর্ট") + "\n" + summary;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("এই ফোনে রাখা রিপোর্ট")
+                .setItems(labels, (dialog, index) -> {
+                    JSONObject report = queue.optJSONObject(index);
+                    if (report != null) showPendingFeedbackReport(report);
+                })
+                .setNegativeButton("বন্ধ", null)
+                .show();
+    }
+
+    private void showPendingFeedbackReport(JSONObject report) {
+        StringBuilder details = new StringBuilder(report.optString("description", ""));
+        if (report.has("deviceDetails")) {
+            details.append("\n\n").append(report.optString("deviceDetails", ""));
+        }
+        JSONArray diagnostics = report.optJSONArray("diagnostics");
+        if (diagnostics != null && diagnostics.length() > 0) {
+            details.append("\n\nপারফরম্যান্স তথ্য:");
+            for (int i = 0; i < diagnostics.length(); i++) {
+                details.append("\n• ").append(diagnostics.optString(i, ""));
+            }
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(report.optString("category", "রিপোর্ট"))
+                .setMessage(details.toString())
+                .setNeutralButton("শেয়ার করুন", (dialog, which) -> shareFeedbackReport(report))
+                .setNegativeButton("মুছুন", (dialog, which) -> confirmDeleteFeedbackReport(report))
+                .setPositiveButton("বন্ধ", null)
+                .show();
+    }
+
+    private void confirmDeleteFeedbackReport(JSONObject report) {
+        new AlertDialog.Builder(this)
+                .setTitle("সংরক্ষিত রিপোর্ট মুছবেন?")
+                .setMessage("মুছে দিলে এই রিপোর্ট ফোন থেকে সরানো হবে।")
+                .setNegativeButton("রাখুন", null)
+                .setPositiveButton("মুছুন", (dialog, which) -> {
+                    String id = report.optString("id", "");
+                    JSONArray queue = loadPendingFeedbackReports();
+                    JSONArray remaining = new JSONArray();
+                    for (int i = 0; i < queue.length(); i++) {
+                        JSONObject item = queue.optJSONObject(i);
+                        if (item != null && !id.equals(item.optString("id", ""))) remaining.put(item);
+                    }
+                    prefs.edit().putString(FEEDBACK_OUTBOX_KEY, remaining.toString()).apply();
+                    Toast.makeText(this, "রিপোর্টটি মুছে ফেলা হয়েছে।", Toast.LENGTH_SHORT).show();
+                })
+                .show();
+    }
+
+    private void shareFeedbackReport(JSONObject report) {
+        try {
+            Intent share = new Intent(Intent.ACTION_SEND);
+            share.setType("text/plain");
+            share.putExtra(Intent.EXTRA_SUBJECT, "এশকে ছাদেক অ্যাপের রিপোর্ট: "
+                    + report.optString("category", "মতামত"));
+            share.putExtra(Intent.EXTRA_TEXT, formatFeedbackReport(report));
+            startActivity(Intent.createChooser(share, "রিপোর্টটি কোথায় শেয়ার করবেন?"));
+        } catch (Exception error) {
+            Toast.makeText(this, "শেয়ার করার অ্যাপ পাওয়া যায়নি। রিপোর্টটি এই ফোনে রাখা আছে।",
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private String formatFeedbackReport(JSONObject report) {
+        StringBuilder text = new StringBuilder("এশকে ছাদেক অ্যাপের রিপোর্ট\n")
+                .append("ধরন: ").append(report.optString("category", ""))
+                .append("\nবিবরণ: ").append(report.optString("description", ""));
+        if (report.has("deviceDetails")) {
+            text.append("\n\nঅ্যাপ ও ফোন: ").append(report.optString("deviceDetails", ""));
+        }
+        JSONArray diagnostics = report.optJSONArray("diagnostics");
+        if (diagnostics != null && diagnostics.length() > 0) {
+            text.append("\n\nঐচ্ছিক পারফরম্যান্স তথ্য:");
+            for (int i = 0; i < diagnostics.length(); i++) {
+                text.append("\n- ").append(diagnostics.optString(i, ""));
+            }
+        }
+        return text.toString();
     }
 
     private void showUserDataBackupOptions() {
@@ -700,12 +1082,14 @@ public class MainActivity extends Activity {
         }
         AppUpdater.checkForUpdates(this, new AppUpdater.CheckCallback() {
             @Override public void onUpdateAvailable(AppUpdater.UpdateInfo update) {
+                prefs.edit().putLong("last_update_check_ms", System.currentTimeMillis()).apply();
                 long dismissed = prefs.getLong("dismissed_update_version", 0L);
                 if (!userInitiated && dismissed == update.versionCode) return;
                 showUpdateAvailable(update);
             }
 
             @Override public void onNoUpdate() {
+                prefs.edit().putLong("last_update_check_ms", System.currentTimeMillis()).apply();
                 if (userInitiated) {
                     Toast.makeText(MainActivity.this, "আপনার অ্যাপটি সর্বশেষ সংস্করণে আছে।",
                             Toast.LENGTH_LONG).show();
@@ -713,11 +1097,19 @@ public class MainActivity extends Activity {
             }
 
             @Override public void onError(String message) {
-                if (userInitiated) {
-                    Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
-                }
+                Log.i("AshkeUpdater", "Update check failed: " + message);
+                if (userInitiated) showUpdateCheckUnavailable();
             }
         });
+    }
+
+    private void showUpdateCheckUnavailable() {
+        new AlertDialog.Builder(this)
+                .setTitle("আপডেট পরীক্ষা করা যাচ্ছে না")
+                .setMessage("ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন। আপনার গান পড়া ও অন্যান্য অফলাইন সুবিধা ব্যবহার করতে পারবেন।")
+                .setPositiveButton("আবার চেষ্টা করুন", (dialog, which) -> checkForAppUpdates(true))
+                .setNegativeButton("ঠিক আছে", null)
+                .show();
     }
 
     private void showUpdateAvailable(AppUpdater.UpdateInfo update) {
@@ -790,7 +1182,7 @@ public class MainActivity extends Activity {
         LinearLayout body = (LinearLayout) scroll.getChildAt(0);
         body.setPadding(dp(18), dp(4), dp(18), dp(18));
         EditText search = searchField("এই খণ্ডে গান খুঁজুন"); activeSearch = search;
-        body.addView(search, matchHeight(52));
+        body.addView(searchInputRow(search), matchWrap());
         addSpace(body, 10);
         LinearLayout results = new LinearLayout(this); results.setOrientation(LinearLayout.VERTICAL); body.addView(results);
         renderSearchResults(results, "", volume);
@@ -801,7 +1193,7 @@ public class MainActivity extends Activity {
         currentScreen = "index";
         mount("গানের সূচী", "খণ্ড বেছে নিয়ে গান পড়ুন", false, true);
         ScrollView scroll=pageScroll(); LinearLayout body=(LinearLayout)scroll.getChildAt(0); body.setPadding(dp(18),dp(6),dp(18),dp(72));
-        EditText search=searchField("সব খণ্ডে গান খুঁজুন"); body.addView(search,matchHeight(52)); activeSearch=search; addSpace(body,10);
+        EditText search=searchField("সব খণ্ডে গান খুঁজুন"); body.addView(searchInputRow(search),matchWrap()); activeSearch=search; addSpace(body,10);
         LinearLayout results=new LinearLayout(this); results.setOrientation(LinearLayout.VERTICAL); body.addView(results);
         renderSearchResults(results,"",0);
         search.addTextChangedListener(watcher(q -> renderSearchResults(results,q,0)));
@@ -931,6 +1323,9 @@ public class MainActivity extends Activity {
                 return 1300 + query.phonetic.length();
         }
         if (query.terms.isEmpty()) return 0;
+        // Two isolated common words are weak evidence. Short queries can still
+        // qualify above when they form a contiguous lyric phrase.
+        if (voiceInput && query.terms.size() < 3) return 0;
 
         int exact = 0, modern = 0, phonetic = 0, prefix = 0, fuzzy = 0;
         for (SearchTerm term : query.terms) {
@@ -1082,6 +1477,7 @@ public class MainActivity extends Activity {
     }
 
     private void openSong(Song song) {
+        if (songSearchDialog != null) songSearchDialog.dismiss();
         saveReaderPosition();
         currentSong=song; lastSongId=song.id;
         LinkedHashSet<String> recent=new LinkedHashSet<>(); recent.add(song.id); recent.addAll(recentIds); recentIds=new ArrayList<>();
@@ -1094,7 +1490,8 @@ public class MainActivity extends Activity {
         currentScreen="reader"; currentSong=song;
         mount("গান "+bn(song.number),volumeNames.get(song.volume-1),true,false);
         TextView headerSearch = iconButton("⌕", 22);
-        headerSearch.setOnClickListener(v -> startOfflineVoice(null));
+        headerSearch.setContentDescription("গান খুঁজুন");
+        headerSearch.setOnClickListener(v -> showSongSearchDialog());
         LinearLayout.LayoutParams hsLp = new LinearLayout.LayoutParams(dp(42), dp(42));
         ((LinearLayout) root.getChildAt(0)).addView(headerSearch, hsLp);
         FrameLayout frame=new FrameLayout(this);
@@ -1145,7 +1542,25 @@ public class MainActivity extends Activity {
         favorite.setOnClickListener(v->{toggleSet(favorites,song.id,"favorites");favorite.setText(favorites.contains(song.id)?"♥\nপ্রিয়":"♡\nপ্রিয়");favorite.setTextColor(favorites.contains(song.id)?GREEN:TEXT);});
         bookmark.setOnClickListener(v->{toggleSet(bookmarks,song.id,"bookmarks");bookmark.setText(bookmarks.contains(song.id)?"▣\nবুকমার্ক":"▢\nবুকমার্ক");bookmark.setTextColor(bookmarks.contains(song.id)?GREEN:TEXT);});
 
-        int lyricSizeSp = screenWidthDp < 360f ? 17 : (screenWidthDp < 600f ? 18 : 20);
+        int lyricSizeSp = currentReaderTextSizeSp(screenWidthDp);
+        LinearLayout textSizeControls = new LinearLayout(this);
+        textSizeControls.setOrientation(LinearLayout.HORIZONTAL);
+        textSizeControls.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+        TextView textSizeLabel = label("লেখার আকার", 12, MUTED, false);
+        textSizeControls.addView(textSizeLabel, new LinearLayout.LayoutParams(0, dp(38), 1f));
+        TextView smallerText = navButton("ছোট −");
+        TextView currentTextSize = label(bn(lyricSizeSp), 12, MUTED, true);
+        currentTextSize.setGravity(Gravity.CENTER);
+        TextView largerText = navButton("বড় +");
+        textSizeControls.addView(smallerText, new LinearLayout.LayoutParams(dp(64), dp(38)));
+        textSizeControls.addView(currentTextSize, new LinearLayout.LayoutParams(dp(36), dp(38)));
+        textSizeControls.addView(largerText, new LinearLayout.LayoutParams(dp(64), dp(38)));
+        smallerText.setContentDescription("গানের লেখা ছোট করুন");
+        largerText.setContentDescription("গানের লেখা বড় করুন");
+        smallerText.setOnClickListener(v -> changeReaderTextSize(song, -1));
+        largerText.setOnClickListener(v -> changeReaderTextSize(song, 1));
+        body.addView(textSizeControls, matchWrap());
+        addSpace(body, 6);
         for (LyricBlock block : song.lyricBlocks) {
             String blockText = song.lyrics.substring(block.startOffset, block.endOffset);
             TextView lyricLine = label(blockText, lyricSizeSp, TEXT, false);
@@ -1218,6 +1633,81 @@ public class MainActivity extends Activity {
         });
     }
 
+    private int defaultReaderTextSizeSp(float screenWidthDp) {
+        return screenWidthDp < 360f ? 17 : (screenWidthDp < 600f ? 18 : 20);
+    }
+
+    private int currentReaderTextSizeSp(float screenWidthDp) {
+        int fallback = defaultReaderTextSizeSp(screenWidthDp);
+        return Math.max(15, Math.min(28, prefs.getInt("reader_text_size_sp", fallback)));
+    }
+
+    private void changeReaderTextSize(Song song, int delta) {
+        float density = getResources().getDisplayMetrics().density;
+        float screenWidthDp = getResources().getDisplayMetrics().widthPixels / density;
+        int current = currentReaderTextSizeSp(screenWidthDp);
+        int updated = Math.max(15, Math.min(28, current + delta));
+        if (updated == current) return;
+        saveReaderPosition();
+        prefs.edit().putInt("reader_text_size_sp", updated).apply();
+        renderReader(song);
+    }
+
+    private void showSongSearchDialog() {
+        if (songSearchDialog != null && songSearchDialog.isShowing()) return;
+        searchBeforeDialog = activeSearch;
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(18), dp(8), dp(18), dp(8));
+        EditText search = searchField("গানের নাম বা একটি লাইন লিখুন");
+        dialogSearchField = search;
+        content.addView(searchInputRow(search), matchWrap());
+        addSpace(content, 8);
+
+        ScrollView resultScroll = new ScrollView(this);
+        resultScroll.setFillViewport(false);
+        LinearLayout results = new LinearLayout(this);
+        results.setOrientation(LinearLayout.VERTICAL);
+        resultScroll.addView(results);
+        content.addView(resultScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+        activeSearch = search;
+        results.addView(label("গানের নাম বা গানের একটি লাইন লিখুন, অথবা মাইক্রোফোনে বলুন।",
+                13, MUTED, false));
+        search.addTextChangedListener(watcher(query -> {
+            if (query.trim().isEmpty()) {
+                results.removeAllViews();
+                results.addView(label("গানের নাম বা গানের একটি লাইন লিখুন, অথবা মাইক্রোফোনে বলুন।",
+                        13, MUTED, false));
+            } else {
+                renderSearchResults(results, query, 0);
+            }
+        }));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("গান খুঁজুন")
+                .setView(content)
+                .setNegativeButton("বন্ধ", null)
+                .create();
+        songSearchDialog = dialog;
+        dialog.setOnDismissListener(ignored -> {
+            if (songSearchDialog == dialog) songSearchDialog = null;
+            if (dialogSearchField == search) dialogSearchField = null;
+            if (activeSearch == search) activeSearch = searchBeforeDialog;
+            searchBeforeDialog = null;
+        });
+        dialog.show();
+        int width = Math.min(dp(520), getResources().getDisplayMetrics().widthPixels - dp(32));
+        int height = Math.round(getResources().getDisplayMetrics().heightPixels * 0.68f);
+        if (dialog.getWindow() != null) dialog.getWindow().setLayout(width, height);
+        search.requestFocus();
+        search.post(() -> {
+            android.view.inputmethod.InputMethodManager keyboard =
+                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (keyboard != null) keyboard.showSoftInput(search,
+                    android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+        });
+    }
+
     private void toggleSet(Set<String> set,String id,String key){
         if(set.contains(id))set.remove(id);else set.add(id);
         prefs.edit().putStringSet(key,new HashSet<>(set)).apply();
@@ -1233,8 +1723,13 @@ public class MainActivity extends Activity {
         cancelVoiceSession();
         voiceSessionCompleted = false;
         voiceListeningStarted = false;
+        voiceCandidateSelected = false;
+        voiceCandidateHistory.clear();
+        pinnedVoiceCandidateId = "";
+        pinnedVoiceCandidateScore = 0;
         lastVoiceCandidateQuery = "";
         lastVoiceCandidateUpdateMs = 0L;
+        voiceSessionStartedUptimeMs = SystemClock.uptimeMillis();
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -1246,7 +1741,7 @@ public class MainActivity extends Activity {
         voiceStatus.setGravity(Gravity.CENTER);
         voiceStatus.setPadding(0, dp(12), 0, dp(8));
         content.addView(voiceStatus, matchWrap());
-        TextView hint = label("প্রথমে প্রস্তুত হওয়া পর্যন্ত অপেক্ষা করুন। তারপর শুরু করে শুধু গানের একটি লাইন বলুন।",
+        TextView hint = label("প্রস্তুত হলে নিজে থেকেই শুনবে। গানের একটি লাইন বলুন—সম্ভাব্য গান দেখা গেলে সেটিতে ছুঁয়ে খুলুন।",
                 13, MUTED, false);
         hint.setGravity(Gravity.CENTER);
         content.addView(hint, matchWrap());
@@ -1259,7 +1754,7 @@ public class MainActivity extends Activity {
                 .setTitle("বাংলা ভয়েস সার্চ")
                 .setView(content)
                 .setNegativeButton("বাতিল", (d, which) -> cancelVoiceSession())
-                .setPositiveButton("শুরু করুন", null)
+                .setPositiveButton("প্রস্তুত হচ্ছে…", null)
                 .create();
         voiceDialog = dialog;
         dialog.setCanceledOnTouchOutside(false);
@@ -1271,32 +1766,36 @@ public class MainActivity extends Activity {
         action.setEnabled(false);
         action.setOnClickListener(v -> {
             if (!voiceServiceStarted) return;
-            if (!voiceListeningStarted) {
-                voiceListeningStarted = true;
-                voiceStatus.setText("মাইক্রোফোন চালু হচ্ছে…");
-                action.setEnabled(false);
-                sendVoiceServiceCommand(VoiceRecognitionService.ACTION_BEGIN);
-            } else {
-                voiceStatus.setText("কথা শনাক্ত করা হচ্ছে…");
-                action.setText("খোঁজা হচ্ছে…");
-                action.setEnabled(false);
-                sendVoiceServiceCommand(VoiceRecognitionService.ACTION_FINISH);
-            }
+            voiceStatus.setText("শোনা শেষ করে গান খোঁজা হচ্ছে…");
+            action.setText("খুঁজছি…");
+            action.setEnabled(false);
+            sendVoiceServiceCommand(VoiceRecognitionService.ACTION_FINISH);
         });
 
         voiceReceiver = new ResultReceiver(new Handler(Looper.getMainLooper())) {
             @Override protected void onReceiveResult(int resultCode, Bundle data) {
+                if (voiceCandidateSelected || voiceSessionCompleted) return;
                 String text = data == null ? "" : data.getString("text", "");
                 if (resultCode == VoiceRecognitionService.RESULT_STATUS) {
                     if (voiceStatus != null) voiceStatus.setText(text);
                     if (voiceDialog != null) {
                         Button button = voiceDialog.getButton(AlertDialog.BUTTON_POSITIVE);
                         if (text.startsWith("প্রস্তুত")) {
-                            button.setText("শুরু করুন");
-                            button.setEnabled(true);
+                            if (!voiceListeningStarted) {
+                                voiceListeningStarted = true;
+                                appendPerformanceDiagnostic("voiceModelReadyMs="
+                                        + (SystemClock.uptimeMillis() - voiceSessionStartedUptimeMs));
+                            button.setText("শোনা হচ্ছে…");
+                                button.setEnabled(false);
+                                voiceStatus.setText("মাইক্রোফোন চালু হচ্ছে…");
+                                sendVoiceServiceCommand(VoiceRecognitionService.ACTION_BEGIN);
+                            }
                         } else if (text.startsWith("শুনছি")) {
-                            button.setText("শেষ করুন ও খুঁজুন");
+                            button.setText("শোনা শেষ করুন");
                             button.setEnabled(true);
+                        } else {
+                            button.setText("প্রস্তুত হচ্ছে…");
+                            button.setEnabled(false);
                         }
                     }
                 } else if (resultCode == VoiceRecognitionService.RESULT_PARTIAL) {
@@ -1426,38 +1925,93 @@ public class MainActivity extends Activity {
         if (now - lastVoiceCandidateUpdateMs < 180L) return;
         lastVoiceCandidateQuery = query;
         lastVoiceCandidateUpdateMs = now;
-        voiceCandidates.removeAllViews();
-        List<Song> matches = new ArrayList<>();
-        java.util.Map<String, Integer> scores = new java.util.HashMap<>();
         SearchQuery preparedQuery = prepareSearchQuery(query);
         for (Song song : songs) {
             int score = scoreSongMatch(song, preparedQuery, true);
-            if (score > 0) { matches.add(song); scores.put(song.id, score); }
+            if (score >= 300) {
+                VoiceCandidate candidate = voiceCandidateHistory.get(song.id);
+                if (candidate == null) {
+                    candidate = new VoiceCandidate(song);
+                    voiceCandidateHistory.put(song.id, candidate);
+                }
+                if (!query.equals(candidate.lastObservedQuery)) {
+                    candidate.observations++;
+                    candidate.lastObservedQuery = query;
+                }
+                if (score >= candidate.bestScore) {
+                    candidate.bestScore = score;
+                    candidate.excerpt = matchingLyricExcerpt(song, preparedQuery);
+                }
+                if (pinnedVoiceCandidateId.isEmpty()
+                        || (song.id.equals(pinnedVoiceCandidateId)
+                        && candidate.bestScore >= pinnedVoiceCandidateScore)
+                        || (candidate.observations >= 2
+                        && candidate.bestScore >= pinnedVoiceCandidateScore + 100)) {
+                    pinnedVoiceCandidateId = song.id;
+                    pinnedVoiceCandidateScore = candidate.bestScore;
+                }
+            }
         }
+        List<VoiceCandidate> matches = new ArrayList<>(voiceCandidateHistory.values());
         Collections.sort(matches, (x, y) -> {
-            int byScore = Integer.compare(scores.get(y.id), scores.get(x.id));
+            if (x.song.id.equals(pinnedVoiceCandidateId)) return -1;
+            if (y.song.id.equals(pinnedVoiceCandidateId)) return 1;
+            int byScore = Integer.compare(y.bestScore, x.bestScore);
             if (byScore != 0) return byScore;
-            if (x.volume != y.volume) return Integer.compare(x.volume, y.volume);
-            return Integer.compare(x.number, y.number);
+            if (x.song.volume != y.song.volume) return Integer.compare(x.song.volume, y.song.volume);
+            return Integer.compare(x.song.number, y.song.number);
         });
+        voiceCandidates.removeAllViews();
         if (matches.isEmpty()) {
             voiceCandidates.addView(label("এখনো নিশ্চিত মিল পাওয়া যায়নি — শুনছি…", 12, MUTED, false));
             return;
         }
-        voiceCandidates.addView(label("সম্ভাব্য গান", 12, GREEN, true));
+        voiceCandidates.addView(label("সম্ভাব্য গান · শোনা চলছে", 12, GREEN, true));
         for (int i = 0; i < Math.min(3, matches.size()); i++) {
-            Song song = matches.get(i);
+            VoiceCandidate candidate = matches.get(i);
+            Song song = candidate.song;
             LinearLayout row = cardRow();
             LinearLayout details = new LinearLayout(this);
             details.setOrientation(LinearLayout.VERTICAL);
             details.addView(label(song.title, 14, TEXT, true));
             details.addView(label(volumeShort(song.volume) + " · গান " + bn(song.number), 11, MUTED, false));
+            TextView excerpt = label(candidate.excerpt, 12, MUTED, false);
+            excerpt.setMaxLines(2);
+            excerpt.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            details.addView(excerpt);
             row.addView(details, new LinearLayout.LayoutParams(0, -2, 1f));
             row.addView(label("খুলুন  ›", 12, GREEN, true));
-            row.setOnClickListener(v -> { cancelVoiceSession(); openSong(song); });
+            row.setOnClickListener(v -> {
+                voiceCandidateSelected = true;
+                cancelVoiceSession();
+                openSong(song);
+            });
             voiceCandidates.addView(row, matchWrap());
             addSpace(voiceCandidates, 6);
         }
+    }
+
+    private String matchingLyricExcerpt(Song song, SearchQuery query) {
+        String bestText = song.firstLine();
+        int bestMatches = 0;
+        for (LyricBlock block : song.lyricBlocks) {
+            String text = song.lyrics.substring(block.startOffset, block.endOffset).trim();
+            String normalized = normalize(text);
+            String modern = normalize(modernizeOldBengali(text));
+            int matches = 0;
+            for (SearchTerm term : query.terms) {
+                if (normalized.contains(term.original) || modern.contains(term.original)
+                        || normalized.contains(term.modern) || modern.contains(term.modern)) {
+                    matches++;
+                }
+            }
+            if (matches > bestMatches) {
+                bestMatches = matches;
+                bestText = text;
+                if (matches == query.terms.size()) break;
+            }
+        }
+        return bestText == null ? "" : bestText;
     }
 
     private void handleVoiceSearchResult(EditText target, String phrase) {
@@ -1587,6 +2141,19 @@ public class MainActivity extends Activity {
 
     private LinearLayout cardColumn(){LinearLayout l=new LinearLayout(this);l.setOrientation(LinearLayout.VERTICAL);l.setBackground(roundFill(SURFACE,18));l.setElevation(dp(1));return l;}
     private LinearLayout cardRow(){LinearLayout l=new LinearLayout(this);l.setOrientation(LinearLayout.HORIZONTAL);l.setGravity(Gravity.CENTER_VERTICAL);l.setPadding(dp(14),dp(12),dp(14),dp(12));l.setBackground(roundStroke(SURFACE,BORDER,17));l.setClickable(true);l.setFocusable(true);return l;}
+    private LinearLayout searchInputRow(EditText search) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(search, new LinearLayout.LayoutParams(0, dp(52), 1f));
+        TextView mic = actionButton("🎙", "বলুন");
+        LinearLayout.LayoutParams micParams = new LinearLayout.LayoutParams(dp(66), dp(52));
+        micParams.leftMargin = dp(8);
+        row.addView(mic, micParams);
+        mic.setContentDescription("মাইক্রোফোনে গান খুঁজুন");
+        mic.setOnClickListener(v -> startOfflineVoice(search));
+        return row;
+    }
     private EditText searchField(String hint){EditText e=new EditText(this);e.setSingleLine(true);e.setTextSize(15);e.setTextColor(TEXT);e.setHintTextColor(MUTED);e.setHint(hint);e.setPadding(dp(15),0,dp(15),0);e.setBackground(roundStroke(SURFACE,BORDER,15));e.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);return e;}
     private TextView label(String text,int size,int color,boolean bold){TextView t=new TextView(this);t.setText(text);t.setTextSize(size);t.setTextColor(color);t.setTypeface(Typeface.create("sans-serif",bold?Typeface.BOLD:Typeface.NORMAL));t.setIncludeFontPadding(true);return t;}
     private TextView iconButton(String text,int size){TextView t=label(text,size,GREEN,true);t.setGravity(Gravity.CENTER);t.setBackground(roundFill(SOFT_GREEN,14));return t;}
@@ -1694,10 +2261,20 @@ public class MainActivity extends Activity {
         Debug.MemoryInfo memoryInfo = new Debug.MemoryInfo();
         Debug.getMemoryInfo(memoryInfo);
         Runtime runtime = Runtime.getRuntime();
-        Log.i("AshkeMemory", phase
+        String event = phase
                 + " pssKb=" + memoryInfo.getTotalPss()
                 + " javaHeapUsedKb=" + ((runtime.totalMemory() - runtime.freeMemory()) / 1024L)
-                + " nativeHeapAllocatedKb=" + (Debug.getNativeHeapAllocatedSize() / 1024L));
+                + " nativeHeapAllocatedKb=" + (Debug.getNativeHeapAllocatedSize() / 1024L);
+        Log.i("AshkeMemory", event);
+        appendPerformanceDiagnostic(event);
+    }
+
+    private void appendPerformanceDiagnostic(String event) {
+        if (prefs == null) return;
+        JSONArray events = loadRecentPerformanceEvents();
+        events.put(System.currentTimeMillis() + " " + event);
+        while (events.length() > 16) events.remove(0);
+        prefs.edit().putString(PERFORMANCE_EVENTS_KEY, events.toString()).apply();
     }
 
     @Override public void onTrimMemory(int level) {
@@ -1753,6 +2330,19 @@ public class MainActivity extends Activity {
             this.title = title; this.words = words; this.modernWords = modernWords;
             for (String word : words) phoneticWords.add(phoneticizeWord(word));
             for (String word : modernWords) phoneticWords.add(phoneticizeWord(word));
+        }
+    }
+
+    private static class VoiceCandidate {
+        final Song song;
+        int bestScore;
+        int observations;
+        String lastObservedQuery = "";
+        String excerpt;
+
+        VoiceCandidate(Song song) {
+            this.song = song;
+            this.excerpt = song.firstLine();
         }
     }
     private static String phoneticizeWord(String value) {

@@ -6,10 +6,11 @@ Native, offline-first Android reader for the complete three-volume Bengali songb
 - Minimum Android 5.0 (API 21), target SDK 36. All 615 songs are bundled locally.
 - Lyrics and paragraph formatting come from the original Word file; the corrected copy supplies index title/order only. Neither source document is modified.
 - Search covers titles, first lines and lyrics; result lists load in batches of 60. Includes volume navigation, direct song-number jump, favourites, bookmarks, recent songs, last-read position, previous/next, and voice/text search.
-- Reader uses a centered, capped measure with proportional Word indents and paragraph spacing. It keeps a stable, readable type size; exceptionally long paragraphs can wrap naturally rather than making every line of a song tiny.
+- The startup shell appears before the catalogue and search index finish loading. Reader paragraphs preserve Word alignment, indents and spacing, reflow to the phone width, and have small/big text controls for individual reading preferences. The source document mostly uses SutonnyOMJ; the app uses Android's Bengali system font, so exact line breaks can differ by device.
 - Voice search uses a bundled int8 Bengali streaming ASR model and sherpa-onnx runtime. Audio is captured and recognized locally; it is never uploaded. The recognizer runs in a private, short-lived Android process separate from the reader UI.
 - The recognizer is loaded only for a voice-search session, uses one inference thread, is explicitly released, and its worker process exits after the session. The idle reader never retains the speech model in its process.
-- The catalogue keeps each song's lyric text once. Paragraphs store source offsets and formatting instead of a second copy of every paragraph string. Normalized and phonetic search forms are generated transiently for each song during a query rather than retained for all songs.
+- The catalogue keeps each song's lyric text once. Paragraphs store source offsets and formatting instead of a second copy of every paragraph string. A compact normalized search index is prepared once after launch; each keystroke or speech update prepares only the query forms and scans that index.
+- The in-app feedback form stores up to 20 reports locally. Device details and recent performance/crash diagnostics are optional; nothing is uploaded by the app. A user can share or delete a saved report manually. No receiving server is configured.
 - Internet access is used only for release update checks/downloads; speech recognition and song reading remain offline. APK installation still requires Android's system confirmation.
 
 ## Offline voice size and compatibility
@@ -18,7 +19,7 @@ The bundled model is the int8-quantized `bbbipul/vosk-small-streaming-bn-int8` d
 
 ## Memory policy and measurement
 
-The ASR process is started only when voice search is explicitly opened. It is isolated as `:voice`, limited to one inference thread, and terminated after its session so the native model's working set does not remain resident in the reader process. If Android kills this worker under memory pressure, the reader remains separate and the UI reports the interrupted session. No service is kept running while the user reads.
+The ASR process is started only when voice search is explicitly opened. It is isolated as `:voice`, limited to one inference thread, and terminated after its session so the native model's working set does not remain resident in the reader process. This means the model has a cold start for each voice search; reuse is deferred until memory can be measured on target phones. If Android kills this worker under memory pressure, the reader remains separate and the UI reports the interrupted session. No service is kept running while the user reads.
 
 The app logs main-process and voice-process PSS, Java heap and native heap measurements with the `AshkeMemory` log tag. Measure on physical devices with `adb shell dumpsys meminfo org.ashkeshadek.reader` and `adb logcat -s AshkeMemory`; record idle home, open reader, active ASR peak, and post-ASR idle. A build passing CI does not prove RAM performance on every device. The practical goal is a small idle reader footprint and a voice-only temporary peak, including tests on 2–3 GB devices with aggressive vendor process management.
 
@@ -43,7 +44,7 @@ A practical memory test should record idle home, reading a long song, search whi
 
 ## Release publishing safety
 
-The app checks the public GitHub releases feed at most once per day and has a manual update entry on the home screen. It downloads only APKs described by the repository's `update.json` manifest, verifies SHA-256, package ID, version code and signing certificate, then uses Android's Package Installer. Android displays the final install confirmation; the app cannot silently install an APK.
+The app checks the public GitHub releases feed at most once per day and has a manual update entry on the home screen. It downloads only APKs described by the repository's `update.json` manifest, verifies SHA-256, package ID, version code and signing certificate, then uses Android's Package Installer. Android displays the final install confirmation; the app cannot silently install an APK. Publishing is only considered after a maintainer manually dispatches the build workflow on `main` and the permanent signing gate is configured; normal pushes build QA artifacts only.
 
 Every published release must use the same permanent signing key and a higher version code. CI release publishing is gated by `ASHKE_STABLE_RELEASE_READY=true` and requires four repository Actions secrets. The earlier beta used regenerated debug signing, so the first permanent-key update needs a one-time manual migration. This version includes a JSON backup/restore tool for favourites, bookmarks, recent songs, last-read song and per-song scroll positions; use it before uninstalling a build that already includes this tool. The older beta distributed before this backup UI was added has no in-app export screen, so its saved state cannot be exported from that older app using this feature. After migration, same-key releases update in place and preserve local data.
 
