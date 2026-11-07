@@ -1314,7 +1314,10 @@ public class MainActivity extends Activity {
         // A short substring is not useful evidence: it creates many accidental
         // matches while someone is speaking. Keep typed autocomplete permissive.
         int phraseMinimum = voiceInput ? 5 : 3;
-        if (query.normalized.length() >= phraseMinimum) {
+        // A long single spoken word can still occur incidentally in a lyric.
+        // Require at least two distinct words before accepting phrase matches.
+        if (query.normalized.length() >= phraseMinimum
+                && (!voiceInput || query.terms.size() >= 2)) {
             if (doc.title.contains(query.normalized)) return 2400 + query.normalized.length();
             if (doc.normalized.contains(query.normalized)) return 1800 + query.normalized.length();
             if (!query.modern.equals(query.normalized) && doc.modern.contains(query.modern))
