@@ -1,82 +1,146 @@
 # এশকে ছাদেক — Android songbook
 
-Native, offline-first Android reader for the complete three-volume Bengali songbook.
+An offline-first Bengali songbook reader for the complete three-volume collection. Read songs, search by title or lyric, and use on-device Bengali speech recognition to find likely matches.
 
-- Native Android Java UI; no PDF viewer or WebView. The PDF is a reference for source rhythm/alignment, not an app-screen template.
-- Minimum Android 5.0 (API 21), target SDK 36. All 615 songs are bundled locally.
-- Lyrics and paragraph formatting come from the original Word file; the corrected copy supplies index title/order only. Neither source document is modified.
-- Search covers titles, first lines and lyrics; result lists load in batches of 60. Includes volume navigation, direct song-number jump, favourites, bookmarks, recent songs, last-read position, previous/next, and voice/text search.
-- The startup shell appears before the catalogue and search index finish loading. Reader paragraphs preserve Word alignment, indents and spacing, reflow to the phone width, and have small/big text controls for individual reading preferences. The source document mostly uses SutonnyOMJ; the app uses Android's Bengali system font, so exact line breaks can differ by device.
-- Voice search uses a bundled int8 Bengali streaming ASR model and sherpa-onnx runtime. Audio is captured and recognized locally; it is never uploaded. The recognizer runs in a private, short-lived Android process separate from the reader UI.
-- The recognizer is loaded only for a voice-search session, uses one inference thread, is explicitly released, and its worker process exits after the session. The idle reader never retains the speech model in its process.
-- The catalogue keeps each song's lyric text once. Paragraphs store source offsets and formatting instead of a second copy of every paragraph string. A compact normalized search index is prepared once after launch; each keystroke or speech update prepares only the query forms and scans that index.
-- The in-app feedback form stores up to 20 reports locally. Device details and recent performance/crash diagnostics are optional; nothing is uploaded by the app. A user can share or delete a saved report manually. No receiving server is configured.
-- Internet access is used only for release update checks/downloads; speech recognition and song reading remain offline. APK installation still requires Android's system confirmation.
+[![Build Android APK](https://github.com/aamiqram/Ashke-Sadek---Android-project/actions/workflows/build-apk.yml/badge.svg?branch=main)](https://github.com/aamiqram/Ashke-Sadek---Android-project/actions/workflows/build-apk.yml)
 
-## Offline voice size and compatibility
+**615 songs · 3 volumes · Android 5.0+ · Bengali interface**
 
-The bundled model is the int8-quantized `bbbipul/vosk-small-streaming-bn-int8` derivative of the Alpha Cephei Bengali Vosk streaming Zipformer2 model; runtime version 2.0.1. The encoder is 26.2 MB, the decoder 2.1 MB, the joiner 0.26 MB and tokens 6 KB. Its model card reports FLEURS Bengali WER 27.06% versus 26.97% for the full-precision model. This benchmark is not a measure of noisy live singing or song-title accuracy. The APK is built for Android ARM phones; x86 emulator libraries are excluded.
+Minimum Android version is 5.0 (API 21); the app targets API 36 and is packaged for ARM phones. x86 emulator libraries are excluded.
 
-## Memory policy and measurement
+## Contents
 
-The ASR process is started only when voice search is explicitly opened. It is isolated as `:voice`, limited to one inference thread, and terminated after its session so the native model's working set does not remain resident in the reader process. This means the model has a cold start for each voice search; reuse is deferred until memory can be measured on target phones. If Android kills this worker under memory pressure, the reader remains separate and the UI reports the interrupted session. No service is kept running while the user reads.
+- [Features](#features)
+- [Voice search and its limits](#voice-search-and-its-limits)
+- [Privacy and network use](#privacy-and-network-use)
+- [Catalogue and reading layout](#catalogue-and-reading-layout)
+- [Performance and memory](#performance-and-memory)
+- [Build and QA](#build-and-qa)
+- [Updates and release process](#updates-and-release-process)
+- [Rebuild the catalogue](#rebuild-the-catalogue)
+- [Third-party notices](#third-party-notices)
 
-The app logs main-process and voice-process PSS, Java heap and native heap measurements with the `AshkeMemory` log tag. Measure on physical devices with `adb shell dumpsys meminfo org.ashkeshadek.reader` and `adb logcat -s AshkeMemory`; record idle home, open reader, active ASR peak, and post-ASR idle. A build passing CI does not prove RAM performance on every device. The practical goal is a small idle reader footprint and a voice-only temporary peak, including tests on 2–3 GB devices with aggressive vendor process management.
+## Features
 
-Audio capture tries 16 kHz, 48 kHz and 44.1 kHz and resamples locally to the model's 16 kHz input. CPU, memory, microphone quality and noise still affect latency and accuracy; physical-device testing is required. [Model card](https://huggingface.co/alphacep/vosk-model-small-streaming-bn) · [sherpa-onnx docs](https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html) · [runtime release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/v2.0.1).
+| Area | What readers can do |
+| --- | --- |
+| Browse | Open the first, second or third volume; browse the song index; jump to a song by number; move to the previous or next song. |
+| Search | Get live typed results from song titles, first lines and lyrics. Search understands older/newer Bengali spellings, phonetic forms, partial words and limited typing errors. Long result lists load in batches. |
+| Voice | Tap the microphone once. The app begins listening automatically when its offline model is ready and shows likely songs while recognition continues. Suggestions include the volume, song number, title and a lyric excerpt. |
+| Read | Read the original Bengali text with paragraph alignment, indentation, emphasis and spacing preserved. Text wraps to the phone width, and the reader has small/big text controls. |
+| Find another song | Open search from inside a song, without returning to the home screen. |
+| Personal library | Save favourites and bookmarks, see recent songs, and return to the last song and its saved scroll position. |
+| Backup and restore | Export or restore favourites, bookmarks, recent songs, last-read song and per-song reading positions as JSON. |
+| Updates | Check for a release manually or through the daily update check. Downloaded APKs are verified before Android's installer opens. |
+| Feedback | Write a problem report or suggestion and save it on the phone. Reports can be reviewed, deleted or shared manually. |
 
-Gradle fetches SHA-256-pinned artifacts during the developer/CI build and packages the speech model as generated app assets. This is not a runtime download. The model metadata declares Apache 2.0; see THIRD_PARTY_NOTICES.md.
+The home screen shows the three volumes and quick access to favourites, bookmarks, recent reading and updates. The catalogue, typed search and voice recognition work without an internet connection.
 
-## Data integrity
+## Voice search and its limits
 
-- 615 songs: volume counts 82 + 289 + 244.
-- All 6,246 source Word lyric paragraphs are preserved.
-- Catalogue asset: about 217 KB compressed / 2.35 MB expanded.
-- Original Word SHA-256: `6fd0fdd333c62221b93610debd7272d9a0e39b3a492e22aa946ee4263a52f23e`.
-- Corrected index-copy SHA-256: `c349196b014dbedf600ac236c3362d90e215912c1e63c406a03c7430496749be`.
-- Duplicate candidates are retained.
+Voice search uses a bundled Bengali streaming speech-recognition model and the sherpa-onnx Android runtime. Recognition and matching happen on the device. Live suggestions require multiple words or a multiword lyric phrase, and matching checks lyric word order to reduce results from ordinary conversation. A candidate stays visible while recognition continues, so a later transcript fragment does not immediately erase it.
 
-## Memory-conscious runtime
+The speech model is loaded for each voice-search session and released afterward to keep its native memory out of the reader process while the user reads. Model startup has taken about 15–20 seconds on some tested phones; latency varies with the device and memory conditions.
 
-The reader keeps a single canonical copy of each song's lyric text. Paragraphs use offsets into that string; search does not retain normalized or phonetic duplicates for all 615 songs. Voice recognition runs in a separate `:voice` process, starts only for an active voice session, uses one CPU inference thread, releases the model, and exits after the session. Main and voice PSS/native-heap telemetry is written to logcat under `AshkeMemory`.
+The int8 model package contains an encoder of about 26.2 MB, a 2.1 MB decoder, a 0.26 MB joiner and roughly 6 KB of tokens. Its published FLEURS Bengali word-error rate is not a measure of accuracy on noisy singing or song identification.
 
-A practical memory test should record idle home, reading a long song, search while typing, voice-model load, active capture, and post-voice idle on physical 2 GB and 3 GB devices. Use `adb shell dumpsys meminfo org.ashkeshadek.reader` and `adb logcat -s AshkeMemory`. CI can verify the architecture and compile, but it cannot certify memory usage on every OEM ROM.
+**Voice search is speech recognition, not music identification.** It can match a Bengali lyric someone says or sings into the microphone. It does not identify a song from audio playing nearby, and it does not save or upload microphone recordings.
 
-## Release publishing safety
+## Privacy and network use
 
-The app checks the public GitHub releases feed at most once per day and has a manual update entry on the home screen. It downloads only APKs described by the repository's `update.json` manifest, verifies SHA-256, package ID, version code and signing certificate, then uses Android's Package Installer. Android displays the final install confirmation; the app cannot silently install an APK. Publishing is only considered after a maintainer manually dispatches the build workflow on `main` and the permanent signing gate is configured; normal pushes build QA artifacts only.
+- Song text, typed queries and speech recognition stay on the phone. There is no analytics or advertising service.
+- The microphone is used only after the reader taps voice search and grants Android's permission.
+- Feedback reports are stored locally, up to 20 at a time. There is no receiving server and no automatic upload. App/device details and recent performance or crash diagnostics are optional; microphone audio, personal files and reading history are not attached. A report leaves the phone only if the reader chooses an app from Android's share sheet.
+- A successful automatic update check is remembered for 24 hours. A failed check does not count as success; the app stays usable, offers a manual retry and tries again on a later launch.
+- Internet access is used for GitHub release checks and APK downloads. If a check fails because the phone is offline or cannot reach GitHub, the app stays usable.
 
-Every published release must use the same permanent signing key and a higher version code. CI release publishing is gated by `ASHKE_STABLE_RELEASE_READY=true` and requires four repository Actions secrets. The earlier beta used regenerated debug signing, so the first permanent-key update needs a one-time manual migration. This version includes a JSON backup/restore tool for favourites, bookmarks, recent songs, last-read song and per-song scroll positions; use it before uninstalling a build that already includes this tool. The older beta distributed before this backup UI was added has no in-app export screen, so its saved state cannot be exported from that older app using this feature. After migration, same-key releases update in place and preserve local data.
+## Catalogue and reading layout
 
-Generate and back up the permanent signing key locally (never commit it):
+The bundled catalogue contains **615 songs**: 82 in the first volume, 289 in the second and 244 in the third. It preserves all 6,246 source Word lyric paragraphs. Lyrics and paragraph formatting are read from the original Word document; the corrected copy supplies song titles and index order. The catalogue-generation script reads both documents and never edits either one. Duplicate candidates remain available in the catalogue data.
+
+The reader maps Word alignment, indents and paragraph spacing to the available screen width. The source document mostly uses the SutonnyOMJ font, which is not bundled in the app; Android uses its Bengali system font instead. As a result, line breaks can differ from Word or PDF even when paragraph formatting is preserved. Readers can adjust text size inside the app.
+
+Integrity reference values:
+
+- Original Word file SHA-256: `6fd0fdd333c62221b93610debd7272d9a0e39b3a492e22aa946ee4263a52f23e`
+- Corrected index copy SHA-256: `c349196b014dbedf600ac236c3362d90e215912c1e63c406a03c7430496749be`
+- Compressed catalogue: about 217 KB; expanded catalogue: about 2.35 MB
+
+## Performance and memory
+
+The catalogue and search index are prepared once during startup. Search updates reuse that index rather than rebuilding normalized lyrics on every keystroke. To keep repeated matching fast, the app retains derived normalized, spelling-variant, phonetic and word-set search forms in addition to the single canonical lyric text for each song.
+
+Voice recognition runs in a private `:voice` process with one inference thread. It is started only for a voice-search session and stopped afterward. Android can still terminate that process under memory pressure; the reader remains separate and reports an interrupted voice session.
+
+The app writes local performance and memory events to the `AshkeMemory` log tag. On a connected test phone, inspect memory with:
+
+```sh
+adb shell dumpsys meminfo org.ashkeshadek.reader
+adb logcat -s AshkeMemory
+```
+
+Check idle home, an open reader, search, voice-model startup, active recognition and post-voice idle. CI builds cannot certify memory use or lifecycle behavior on every device or vendor version of Android.
+
+## Build and QA
+
+### Requirements
+
+- JDK 21
+- Gradle 9.6.0 (the repository does not include a Gradle wrapper)
+- Android SDK Platform 36 and Build Tools 36.0.0
+- Internet access for the initial build to fetch the pinned speech runtime and model
+
+Set `ANDROID_HOME` or configure `local.properties` with `sdk.dir`, then run from the repository root:
+
+```sh
+gradle --no-daemon :app:assembleDebug
+```
+
+The installable debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`. To assemble the optimized release variant:
+
+```sh
+gradle --no-daemon :app:assembleRelease
+```
+
+Without the permanent release signing key, the release APK is unsigned and is for QA only. The build fetches pinned dependencies and checks the runtime and ONNX model-weight SHA-256 values before packaging them as app assets; model files are not downloaded by the installed app.
+
+GitHub Actions runs catalogue validation and assembles debug and release APK variants for pull requests, pushes to `main` and manual dispatches. The installable debug artifact is named `ashke-shadek-installable-debug-apk` and is retained for 14 days.
+
+## Updates and release process
+
+After a successful result, the updater waits 24 hours before its next automatic check; a manual check is also available on the home screen. A failed network check is not cached as success. The updater only accepts APK information from the repository's `update.json` manifest. Before installation, the app verifies the APK checksum, package name, version code and signing certificate. Android displays the final installation confirmation; the app cannot install silently.
+
+Normal pushes to `main` build QA artifacts but do not publish a release. Publishing requires a successful manual dispatch of the build workflow on `main`, the variable `ASHKE_STABLE_RELEASE_READY=true`, and the permanent signing secrets below.
+
+Every release must use the same permanent signing key and a higher version code. Generate and back up the key securely; never commit it or share its passwords:
 
 ```powershell
 keytool -genkeypair -v -keystore ashke-shadek-release.jks -alias ashke-shadek -keyalg RSA -keysize 4096 -validity 10000
-[Convert]::ToBase64String([IO.File]::ReadAllBytes(".\\ashke-shadek-release.jks")) | Set-Clipboard
+[Convert]::ToBase64String([IO.File]::ReadAllBytes(".\ashke-shadek-release.jks")) | Set-Clipboard
 ```
 
-In GitHub repository **Settings → Secrets and variables → Actions**, add:
-- `ASHKE_KEYSTORE_BASE64` — copied Base64 keystore content
-- `ASHKE_KEYSTORE_PASSWORD` — keystore password
-- `ASHKE_KEY_ALIAS` — `ashke-shadek`
-- `ASHKE_KEY_PASSWORD` — key password
+In **GitHub → Settings → Secrets and variables → Actions**, configure:
 
-After checking that a signed test APK uses the same certificate for all future builds, set repository Actions variable `ASHKE_STABLE_RELEASE_READY` to `true`. Keep the keystore backup offline and never share its passwords.
+| Name | Purpose |
+| --- | --- |
+| `ASHKE_KEYSTORE_BASE64` | Base64-encoded keystore |
+| `ASHKE_KEYSTORE_PASSWORD` | Keystore password |
+| `ASHKE_KEY_ALIAS` | Signing key alias |
+| `ASHKE_KEY_PASSWORD` | Key password |
+| `ASHKE_STABLE_RELEASE_READY` | Actions variable; set to `true` only after validating the permanent key and signed update path |
 
-## Build
+Use the in-app JSON backup before changing signing keys or moving between installations that cannot update in place. A same-certificate update preserves app data.
 
-- JDK 21, Android SDK Platform 36, Build Tools 36.0.0.
-- Android Gradle Plugin 9.5.0, Gradle 9.6.0.
-- `tar` on PATH for unpacking the model archive; Windows 10/11 includes `tar.exe`.
-- The initial developer/CI build needs internet access to fetch the pinned runtime/model. The installed app's reader and speech recognition are designed for offline use.
+## Rebuild the catalogue
 
-Run `:app:assembleDebug` for an installable debug APK or `:app:assembleRelease` for the optimized unsigned APK. A permanent signing key is required before release distribution. GitHub Actions builds both on push to `main` and manual dispatch; artifacts are uploaded, not published.
-
-## Rebuild catalogue
-
-Install Python 3 and `python-docx`, then run:
+Install Python 3 and `python-docx`, then run the extractor with the original Word file and corrected index copy. The source documents are read only; the generated catalogue and emphasis assets are written into the repository.
 
 ```powershell
-python extract_catalog.py --original "C:\path\এশকে ছাদেক.docx" --index "C:\path\এশকে ছাদেক_সূচী সংশোধিত কপি.docx"
+python -m pip install python-docx
+python extract_catalog.py --original "C:\path\এশকে ছাদেক.docx" --index "C:\path\এশকে ছাদেক (ডুপ্লিকেট বাদ).docx"
 python tests\validate_catalog.py
 ```
+
+## Third-party notices
+
+The offline speech runtime and Bengali model have separate third-party terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution and licensing details. The runtime is sherpa-onnx 2.0.1; the bundled model is an int8-quantized Bengali streaming Zipformer2 derivative. Its published FLEURS Bengali word-error rate is not a measure of accuracy on noisy singing or song identification. See the [model card](https://huggingface.co/alphacep/vosk-model-small-streaming-bn), [sherpa-onnx documentation](https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html) and [runtime release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/v2.0.1).
