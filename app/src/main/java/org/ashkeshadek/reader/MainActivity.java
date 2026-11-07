@@ -923,12 +923,15 @@ public class MainActivity extends Activity {
         if (doc == null) return 0;
 
         // Do not treat one-character substrings as useful search results.
-        if (query.normalized.length() >= 4 && doc.title.contains(query.normalized))
+        boolean phraseHasEnoughEvidence = !voiceQuery || query.terms.size() >= 2;
+        if (phraseHasEnoughEvidence && query.normalized.length() >= 4
+                && doc.title.contains(query.normalized))
             return 2400 + query.normalized.length();
-        if (query.normalized.length() >= 4 && doc.normalized.contains(query.normalized))
+        if (phraseHasEnoughEvidence && query.normalized.length() >= 4
+                && doc.normalized.contains(query.normalized))
             return 1750 + query.normalized.length();
-        if (query.modern.length() >= 4 && !query.modern.equals(query.normalized)
-                && doc.modern.contains(query.modern))
+        if (phraseHasEnoughEvidence && query.modern.length() >= 4
+                && !query.modern.equals(query.normalized) && doc.modern.contains(query.modern))
             return 1500 + query.modern.length();
         if (!voiceQuery && query.phonetic.length() >= 4 && doc.phonetic.contains(query.phonetic))
             return 1250 + query.phonetic.length();
