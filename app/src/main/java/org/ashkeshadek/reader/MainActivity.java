@@ -837,6 +837,7 @@ public class MainActivity extends Activity {
         List<Song> matches = new ArrayList<>();
         java.util.Map<String, Integer> scores = new java.util.HashMap<>();
         String q = normalize(query);
+        SearchQuery preparedQuery = prepareSearchQuery(query);
         Song direct = q.isEmpty() ? null : resolveDirectJump(query, volumeFilter > 0 ? volumeFilter : 0);
         if (direct != null && volumeFilter > 0 && direct.volume != volumeFilter) direct = null;
         if (direct != null) {
@@ -844,7 +845,7 @@ public class MainActivity extends Activity {
         } else {
             for (Song song : songs) {
                 if (volumeFilter > 0 && song.volume != volumeFilter) continue;
-                int score = q.isEmpty() ? 1 : scoreSongMatch(song, query);
+                int score = q.isEmpty() ? 1 : scoreSongMatch(song, preparedQuery);
                 if (score > 0) {
                     matches.add(song);
                     scores.put(song.id, score);
@@ -886,29 +887,33 @@ public class MainActivity extends Activity {
         }
     }
 
-    private int scoreSongMatch(Song song, String query) {
-        String compact = normalize(query);
-        if (compact.isEmpty()) return 0;
-        SearchDocument doc = searchIndex.get(song.id);
-        if (doc == null) return 0;
-        String modernQuery = normalize(modernizeOldBengali(query));
-        String phoneticQuery = phoneticNormalize(query);
-        if (doc.title.contains(compact)) return 2200 + compact.length();
-        if (doc.normalized.contains(compact)) return 1600 + compact.length();
-        if (!modernQuery.equals(compact) && doc.modern.contains(modernQuery))
-            return 1350 + modernQuery.length();
-        if (phoneticQuery.length() >= 3 && doc.phonetic.contains(phoneticQuery))
-            return 1120 + phoneticQuery.length();
-
+    private SearchQuery prepareSearchQuery(String value) {
+        String original = value == null ? "" : value;
         List<String> terms = new ArrayList<>();
-        Matcher matcher = WORD_PATTERN.matcher(query);
+        Matcher matcher = WORD_PATTERN.matcher(original);
         while (matcher.find()) {
             String token = normalize(matcher.group());
             if (token.length() >= 2) terms.add(token);
         }
-        if (terms.isEmpty()) return 0;
+        return new SearchQuery(normalize(original),
+                normalize(modernizeOldBengali(original)),
+                phoneticNormalize(original), terms);
+    }
+
+    private int scoreSongMatch(Song song, SearchQuery query) {
+        if (query.normalized.isEmpty()) return 0;
+        SearchDocument doc = searchIndex.get(song.id);
+        if (doc == null) return 0;
+        if (doc.title.contains(query.normalized)) return 2200 + query.normalized.length();
+        if (doc.normalized.contains(query.normalized)) return 1600 + query.normalized.length();
+        if (!query.modern.equals(query.normalized) && doc.modern.contains(query.modern))
+            return 1350 + query.modern.length();
+        if (query.phonetic.length() >= 3 && doc.phonetic.contains(query.phonetic))
+            return 1120 + query.phonetic.length();
+        if (query.terms.isEmpty()) return 0;
+
         int exact = 0, modern = 0, phonetic = 0, prefix = 0, fuzzy = 0;
-        for (String token : terms) {
+        for (String token : query.terms) {
             String modernToken = normalize(modernizeOldBengali(token));
             String soundToken = phoneticNormalize(token);
             if (doc.words.contains(token)) exact++;
@@ -919,11 +924,11 @@ public class MainActivity extends Activity {
         }
         int matched = exact + modern + phonetic + prefix + fuzzy;
         if (matched == 0) return 0;
-        int coverage = matched * 100 / terms.size();
+        int coverage = matched * 100 / query.terms.size();
         int score = exact * 110 + modern * 88 + phonetic * 72 + prefix * 58 + fuzzy * 42 + coverage;
-        if (terms.size() >= 2 && matched == terms.size()) score += 90;
-        if (terms.size() >= 3 && matched < 2) return 0;
-        if (terms.size() >= 4 && coverage < 35) return 0;
+        if (query.terms.size() >= 2 && matched == query.terms.size()) score += 90;
+        if (query.terms.size() >= 3 && matched < 2) return 0;
+        if (query.terms.size() >= 4 && coverage < 35) return 0;
         return score;
     }
 
@@ -1361,8 +1366,9 @@ public class MainActivity extends Activity {
         voiceCandidates.removeAllViews();
         List<Song> matches = new ArrayList<>();
         java.util.Map<String, Integer> scores = new java.util.HashMap<>();
+        SearchQuery preparedQuery = prepareSearchQuery(query);
         for (Song song : songs) {
-            int score = scoreSongMatch(song, query);
+            int score = scoreSongMatch(song, preparedQuery);
             if (score > 0) { matches.add(song); scores.put(song.id, score); }
         }
         Collections.sort(matches, (x, y) -> {
@@ -1655,6 +1661,15 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy(){cancelVoiceSession();super.onDestroy();}
+
+    private static class SearchQuery {
+        final String normalized, modern, phonetic;
+        final List<String> terms;
+        SearchQuery(String normalized, String modern, String phonetic, List<String> terms) {
+            this.normalized = normalized; this.modern = modern;
+            this.phonetic = phonetic; this.terms = terms;
+        }
+    }
 
     private static class SearchDocument {
         final String normalized, modern, phonetic, title;
