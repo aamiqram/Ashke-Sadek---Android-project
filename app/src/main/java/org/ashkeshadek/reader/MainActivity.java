@@ -1165,6 +1165,8 @@ public class MainActivity extends Activity {
         cancelVoiceSession();
         voiceSessionCompleted = false;
         voiceListeningStarted = false;
+        lastVoiceCandidateQuery = "";
+        lastVoiceCandidateUpdateMs = 0L;
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -1350,13 +1352,13 @@ public class MainActivity extends Activity {
     /** Shows the strongest three live catalogue candidates while recognition continues. */
     private void renderVoiceCandidates(String transcript) {
         if (voiceCandidates == null) return;
-        voiceCandidates.removeAllViews();
         String query = transcript == null ? "" : transcript.trim();
         if (query.isEmpty() || query.equals(lastVoiceCandidateQuery)) return;
         long now = System.currentTimeMillis();
         if (now - lastVoiceCandidateUpdateMs < 180L) return;
         lastVoiceCandidateQuery = query;
         lastVoiceCandidateUpdateMs = now;
+        voiceCandidates.removeAllViews();
         List<Song> matches = new ArrayList<>();
         java.util.Map<String, Integer> scores = new java.util.HashMap<>();
         for (Song song : songs) {
