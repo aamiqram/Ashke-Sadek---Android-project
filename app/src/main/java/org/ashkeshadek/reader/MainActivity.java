@@ -113,6 +113,7 @@ public class MainActivity extends Activity {
     }
 
     private final List<Song> songs = new ArrayList<>();
+    private final java.util.Map<String, SearchDocument> searchIndex = new java.util.HashMap<>();
     private final List<String> volumeNames = new ArrayList<>();
     private SharedPreferences prefs;
     private Set<String> favorites = new LinkedHashSet<>();
@@ -133,6 +134,7 @@ public class MainActivity extends Activity {
     private boolean voiceServiceBound;
     private AlertDialog voiceDialog;
     private TextView voiceStatus;
+    private LinearLayout voiceCandidates;
     private boolean voiceSessionCompleted = false;
     private boolean voiceListeningStarted = false;
 
@@ -144,6 +146,7 @@ public class MainActivity extends Activity {
         lastSongId = prefs.getString("last_song", "");
         recentIds = parseRecent(prefs.getString("recent", ""));
         loadCatalog();
+        buildSearchIndex();
         loadEmphasis();
         logMemory("main-after-catalog");
         enforceStorageBudget();
@@ -869,49 +872,63 @@ public class MainActivity extends Activity {
         if (firstBatch < matches.size()) addMoreResults(target, matches, firstBatch);
     }
 
+    /** Reuses a compact catalogue index instead of normalizing all 615 lyric corpora per keystroke. */
+    private void buildSearchIndex() {
+        searchIndex.clear();
+        for (Song song : songs) {
+            String corpus = song.title + " " + song.lyrics;
+            String modern = modernizeOldBengali(corpus);
+            searchIndex.put(song.id, new SearchDocument(normalize(corpus), normalize(modern),
+                    phoneticNormalize(corpus), normalize(song.title),
+                    searchWords(corpus), searchWords(modern)));
+        }
+    }
+
     private int scoreSongMatch(Song song, String query) {
         String compact = normalize(query);
         if (compact.isEmpty()) return 0;
-        // Build only the current song's transient search representation.
-        // No duplicate normalized/phonetic corpus or token sets are retained on every Song.
-        String corpus = song.title + " " + song.lyrics;
-        String originalCorpus = normalize(corpus);
-        if (originalCorpus.contains(compact)) return 1000 + compact.length();
-        String modernSource = modernizeOldBengali(corpus);
-        String modernCorpus = normalize(modernSource);
-        if (modernCorpus.contains(compact)) return 850 + compact.length();
-        String phoneticCorpus = phoneticNormalize(corpus);
-        String phonetic = phoneticNormalize(query);
-        if (phonetic.length() >= 3 && phoneticCorpus.contains(phonetic))
-            return 700 + phonetic.length();
+        SearchDocument doc = searchIndex.get(song.id);
+        if (doc == null) return 0;
+        String modernQuery = normalize(modernizeOldBengali(query));
+        String phoneticQuery = phoneticNormalize(query);
+        if (doc.title.contains(compact)) return 2200 + compact.length();
+        if (doc.normalized.contains(compact)) return 1600 + compact.length();
+        if (!modernQuery.equals(compact) && doc.modern.contains(modernQuery))
+            return 1350 + modernQuery.length();
+        if (phoneticQuery.length() >= 3 && doc.phonetic.contains(phoneticQuery))
+            return 1120 + phoneticQuery.length();
 
-        List<String> terms = new ArrayList<>(searchWords(query));
+        List<String> terms = new ArrayList<>();
+        Matcher matcher = WORD_PATTERN.matcher(query);
+        while (matcher.find()) {
+            String token = normalize(matcher.group());
+            if (token.length() >= 2) terms.add(token);
+        }
         if (terms.isEmpty()) return 0;
-        Set<String> originalWords = searchWords(corpus);
-        Set<String> modernWords = searchWords(modernSource);
-        Set<String> phoneticWords = new HashSet<>();
-        for (String word : originalWords) phoneticWords.add(phoneticNormalize(word));
-        for (String word : modernWords) phoneticWords.add(phoneticNormalize(word));
-        int exact = 0, modern = 0, phoneticHits = 0, fuzzy = 0;
+        int exact = 0, modern = 0, phonetic = 0, prefix = 0, fuzzy = 0;
         for (String token : terms) {
-            if (token.length() < 2) continue;
             String modernToken = normalize(modernizeOldBengali(token));
             String soundToken = phoneticNormalize(token);
-            if (originalWords.contains(token)) exact++;
-            else if (modernWords.contains(token)
-                    || originalWords.contains(modernToken)
-                    || modernWords.contains(modernToken)) modern++;
-            else if (phoneticWords.contains(soundToken)) phoneticHits++;
-            else if (token.length() >= 4 && hasOneEditMatch(token, originalWords)) fuzzy++;
+            if (doc.words.contains(token)) exact++;
+            else if (doc.modernWords.contains(token) || doc.words.contains(modernToken)) modern++;
+            else if (doc.phoneticWords.contains(soundToken)) phonetic++;
+            else if (hasPrefixMatch(token, doc.words, doc.modernWords)) prefix++;
+            else if (token.length() >= 4 && hasOneEditMatch(token, doc.words)) fuzzy++;
         }
-        int matched = exact + modern + phoneticHits + fuzzy;
-        int usableTerms = 0;
-        for (String token : terms) if (token.length() >= 2) usableTerms++;
+        int matched = exact + modern + phonetic + prefix + fuzzy;
         if (matched == 0) return 0;
-        if (usableTerms >= 2 && matched < 2) return 0;
-        if (usableTerms >= 4 && matched * 4 < usableTerms) return 0;
-        return exact * 100 + modern * 78 + phoneticHits * 62 + fuzzy * 38
-                + (matched * 25 / Math.max(1, usableTerms));
+        int coverage = matched * 100 / terms.size();
+        int score = exact * 110 + modern * 88 + phonetic * 72 + prefix * 58 + fuzzy * 42 + coverage;
+        if (terms.size() >= 2 && matched == terms.size()) score += 90;
+        if (terms.size() >= 3 && matched < 2) return 0;
+        if (terms.size() >= 4 && coverage < 35) return 0;
+        return score;
+    }
+
+    private boolean hasPrefixMatch(String query, Set<String> original, Set<String> modern) {
+        for (String word : original) if (word.startsWith(query)) return true;
+        for (String word : modern) if (word.startsWith(query)) return true;
+        return false;
     }
 
     /** Search-only spelling bridge; displayed lyrics always remain in the original text. */
@@ -1161,6 +1178,10 @@ public class MainActivity extends Activity {
                 13, MUTED, false);
         hint.setGravity(Gravity.CENTER);
         content.addView(hint, matchWrap());
+        voiceCandidates = new LinearLayout(this);
+        voiceCandidates.setOrientation(LinearLayout.VERTICAL);
+        voiceCandidates.setPadding(0, dp(12), 0, 0);
+        content.addView(voiceCandidates, matchWrap());
 
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("বাংলা ভয়েস সার্চ")
@@ -1208,6 +1229,7 @@ public class MainActivity extends Activity {
                     }
                 } else if (resultCode == VoiceRecognitionService.RESULT_PARTIAL) {
                     if (voiceStatus != null) voiceStatus.setText("শুনছি…\n" + text);
+                    renderVoiceCandidates(text);
                 } else if (resultCode == VoiceRecognitionService.RESULT_TEXT) {
                     finishVoiceDialog();
                     handleVoiceSearchResult(target, text);
@@ -1298,6 +1320,7 @@ public class MainActivity extends Activity {
             old.dismiss();
         }
         voiceStatus = null;
+        voiceCandidates = null;
         voiceReceiver = null;
         voiceServiceStarted = false;
         unbindVoiceService();
@@ -1313,12 +1336,51 @@ public class MainActivity extends Activity {
         voiceServiceStarted = false;
         unbindVoiceService();
         voiceStatus = null;
+        voiceCandidates = null;
         if (voiceDialog != null) {
             AlertDialog old = voiceDialog;
             voiceDialog = null;
             old.dismiss();
         }
         voiceListeningStarted = false;
+    }
+
+    /** Shows the strongest three live catalogue candidates while recognition continues. */
+    private void renderVoiceCandidates(String transcript) {
+        if (voiceCandidates == null) return;
+        voiceCandidates.removeAllViews();
+        String query = transcript == null ? "" : transcript.trim();
+        if (query.isEmpty()) return;
+        List<Song> matches = new ArrayList<>();
+        java.util.Map<String, Integer> scores = new java.util.HashMap<>();
+        for (Song song : songs) {
+            int score = scoreSongMatch(song, query);
+            if (score > 0) { matches.add(song); scores.put(song.id, score); }
+        }
+        Collections.sort(matches, (x, y) -> {
+            int byScore = Integer.compare(scores.get(y.id), scores.get(x.id));
+            if (byScore != 0) return byScore;
+            if (x.volume != y.volume) return Integer.compare(x.volume, y.volume);
+            return Integer.compare(x.number, y.number);
+        });
+        if (matches.isEmpty()) {
+            voiceCandidates.addView(label("এখনো নিশ্চিত মিল পাওয়া যায়নি — শুনছি…", 12, MUTED, false));
+            return;
+        }
+        voiceCandidates.addView(label("সম্ভাব্য গান", 12, GREEN, true));
+        for (int i = 0; i < Math.min(3, matches.size()); i++) {
+            Song song = matches.get(i);
+            LinearLayout row = cardRow();
+            LinearLayout details = new LinearLayout(this);
+            details.setOrientation(LinearLayout.VERTICAL);
+            details.addView(label(song.title, 14, TEXT, true));
+            details.addView(label(volumeShort(song.volume) + " · গান " + bn(song.number), 11, MUTED, false));
+            row.addView(details, new LinearLayout.LayoutParams(0, -2, 1f));
+            row.addView(label("খুলুন  ›", 12, GREEN, true));
+            row.setOnClickListener(v -> { cancelVoiceSession(); openSong(song); });
+            voiceCandidates.addView(row, matchWrap());
+            addSpace(voiceCandidates, 6);
+        }
     }
 
     private void handleVoiceSearchResult(EditText target, String phrase) {
@@ -1483,7 +1545,7 @@ public class MainActivity extends Activity {
                 if (pending != null) handler.removeCallbacks(pending);
                 String query = s.toString();
                 pending = () -> callback.onTextChanged(query);
-                handler.postDelayed(pending, 140L);
+                handler.postDelayed(pending, 65L);
             }
 
             @Override public void afterTextChanged(Editable editable) { }
@@ -1585,6 +1647,23 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy(){cancelVoiceSession();super.onDestroy();}
+
+    private static class SearchDocument {
+        final String normalized, modern, phonetic, title;
+        final Set<String> words, modernWords, phoneticWords = new HashSet<>();
+        SearchDocument(String normalized, String modern, String phonetic, String title,
+                       Set<String> words, Set<String> modernWords) {
+            this.normalized = normalized; this.modern = modern; this.phonetic = phonetic;
+            this.title = title; this.words = words; this.modernWords = modernWords;
+            for (String word : words) phoneticWords.add(phoneticizeWord(word));
+            for (String word : modernWords) phoneticWords.add(phoneticizeWord(word));
+        }
+    }
+    private static String phoneticizeWord(String value) {
+        return value.replace("শ", "স").replace("ষ", "স").replace("ণ", "ন")
+                .replace("ী", "ি").replace("ঈ", "ই").replace("ূ", "ু")
+                .replace("ঊ", "উ").replace("ৎ", "ত");
+    }
 
     private static class Song {
         final String id; final int volume; final int number; final String title; final String lyrics;
