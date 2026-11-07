@@ -135,6 +135,8 @@ public class MainActivity extends Activity {
     private AlertDialog voiceDialog;
     private TextView voiceStatus;
     private LinearLayout voiceCandidates;
+    private long lastVoiceCandidateUpdateMs;
+    private String lastVoiceCandidateQuery = "";
     private boolean voiceSessionCompleted = false;
     private boolean voiceListeningStarted = false;
 
@@ -1350,7 +1352,11 @@ public class MainActivity extends Activity {
         if (voiceCandidates == null) return;
         voiceCandidates.removeAllViews();
         String query = transcript == null ? "" : transcript.trim();
-        if (query.isEmpty()) return;
+        if (query.isEmpty() || query.equals(lastVoiceCandidateQuery)) return;
+        long now = System.currentTimeMillis();
+        if (now - lastVoiceCandidateUpdateMs < 180L) return;
+        lastVoiceCandidateQuery = query;
+        lastVoiceCandidateUpdateMs = now;
         List<Song> matches = new ArrayList<>();
         java.util.Map<String, Integer> scores = new java.util.HashMap<>();
         for (Song song : songs) {
