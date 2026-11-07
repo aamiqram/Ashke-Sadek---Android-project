@@ -889,11 +889,16 @@ public class MainActivity extends Activity {
 
     private SearchQuery prepareSearchQuery(String value) {
         String original = value == null ? "" : value;
-        List<String> terms = new ArrayList<>();
+        List<SearchToken> terms = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
         Matcher matcher = WORD_PATTERN.matcher(original);
         while (matcher.find()) {
             String token = normalize(matcher.group());
-            if (token.length() >= 2) terms.add(token);
+            if (token.length() >= 2 && seen.add(token)) {
+                terms.add(new SearchToken(token,
+                        normalize(modernizeOldBengali(token)),
+                        phoneticNormalize(token)));
+            }
         }
         return new SearchQuery(normalize(original),
                 normalize(modernizeOldBengali(original)),
@@ -913,14 +918,14 @@ public class MainActivity extends Activity {
         if (query.terms.isEmpty()) return 0;
 
         int exact = 0, modern = 0, phonetic = 0, prefix = 0, fuzzy = 0;
-        for (String token : query.terms) {
-            String modernToken = normalize(modernizeOldBengali(token));
-            String soundToken = phoneticNormalize(token);
-            if (doc.words.contains(token)) exact++;
-            else if (doc.modernWords.contains(token) || doc.words.contains(modernToken)) modern++;
-            else if (doc.phoneticWords.contains(soundToken)) phonetic++;
-            else if (hasPrefixMatch(token, doc.words, doc.modernWords)) prefix++;
-            else if (token.length() >= 4 && hasOneEditMatch(token, doc.words)) fuzzy++;
+        for (SearchToken token : query.terms) {
+            if (doc.words.contains(token.original)) exact++;
+            else if (doc.modernWords.contains(token.original)
+                    || doc.words.contains(token.modern)) modern++;
+            else if (doc.phoneticWords.contains(token.phonetic)) phonetic++;
+            else if (hasPrefixMatch(token.original, doc.words, doc.modernWords)) prefix++;
+            else if (token.original.length() >= 4
+                    && hasOneEditMatch(token.original, doc.words)) fuzzy++;
         }
         int matched = exact + modern + phonetic + prefix + fuzzy;
         if (matched == 0) return 0;
@@ -1377,8 +1382,27 @@ public class MainActivity extends Activity {
             if (x.volume != y.volume) return Integer.compare(x.volume, y.volume);
             return Integer.compare(x.number, y.number);
         });
+
+        // Voice is noisier than typed input. Never surface a song from one
+        // incidental spoken word: require multiple matching lyric words, or
+        // one long, exact and unambiguous lyric phrase.
+        if (preparedQuery.terms.size() >= 2) {
+            List<Song> confident = new ArrayList<>();
+            for (Song song : matches) {
+                if (scores.get(song.id) >= 200) confident.add(song);
+            }
+            matches = confident;
+        } else if (preparedQuery.terms.size() == 1
+                && preparedQuery.normalized.length() >= 6) {
+            boolean uniqueExactPhrase = matches.size() == 1
+                    && scores.get(matches.get(0).id) >= 1600;
+            if (!uniqueExactPhrase) matches.clear();
+        } else {
+            matches.clear();
+        }
+
         if (matches.isEmpty()) {
-            voiceCandidates.addView(label("এখনো নিশ্চিত মিল পাওয়া যায়নি — শুনছি…", 12, MUTED, false));
+            voiceCandidates.addView(label("এখনো যথেষ্ট মিল পাওয়া যায়নি — শুনছি…", 12, MUTED, false));
             return;
         }
         voiceCandidates.addView(label("সম্ভাব্য গান", 12, GREEN, true));
@@ -1664,10 +1688,19 @@ public class MainActivity extends Activity {
 
     private static class SearchQuery {
         final String normalized, modern, phonetic;
-        final List<String> terms;
-        SearchQuery(String normalized, String modern, String phonetic, List<String> terms) {
+        final List<SearchToken> terms;
+        SearchQuery(String normalized, String modern, String phonetic, List<SearchToken> terms) {
             this.normalized = normalized; this.modern = modern;
             this.phonetic = phonetic; this.terms = terms;
+        }
+    }
+
+    private static class SearchToken {
+        final String original, modern, phonetic;
+        SearchToken(String original, String modern, String phonetic) {
+            this.original = original;
+            this.modern = modern;
+            this.phonetic = phonetic;
         }
     }
 
