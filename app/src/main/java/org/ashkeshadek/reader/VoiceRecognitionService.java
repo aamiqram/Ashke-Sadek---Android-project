@@ -30,6 +30,7 @@ public final class VoiceRecognitionService extends Service {
     public static final int RESULT_TEXT = 3;
     public static final int RESULT_ERROR = 4;
     public static final int RESULT_FINISHED = 5;
+    public static final int RESULT_AUDIO_HINT = 6;
 
     private ResultReceiver receiver;
     private OfflineBengaliVoice engine;
@@ -110,6 +111,12 @@ public final class VoiceRecognitionService extends Service {
 
                 @Override public void onPartial(String text) {
                     sendText(RESULT_PARTIAL, text);
+                }
+
+                @Override public void onAudioHint(String message) {
+                    // Empty text means the hint cleared: restore a normal
+                    // listening line instead of leaving stale wording.
+                    sendText(RESULT_AUDIO_HINT, message == null ? "" : message);
                 }
 
                 @Override public void onResult(String text) {

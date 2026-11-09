@@ -22,3 +22,27 @@ Voice:
 - Physical-device accuracy, latency, RAM/thermal effects still require QA.
 
 Previous remote version compiled and produced debug/release APK artifacts. New ASR JNI and responsive reader revision requires a new CI compile, package-size check and real-device QA. Release signing remains outstanding.
+
+---
+
+Voice-text matching + honest mic feedback (Nov 9, 2026 working tree, awaiting push):
+
+- Fuzzy n-gram fallback for voice suggestions: when strict word-order evidence
+  disappears (sung audio), character n-gram containment of the transcript tail
+  against every song's normalized lyric text keeps the real song suggested.
+  Sketch sampling (256 hashes/song, ~1.2 MB) keeps the per-refresh cost tiny;
+  verification is exact. Constants verified by tests/calibrate_voice_fuzzy.py
+  over the real catalogue: ~96-98% recall for lightly garbled sung transcripts
+  in the top suggestions, ~35% for heavily garbled ones, ~0.13 stray
+  conversation candidates per chatter window. CI runs this calibration on
+  every build.
+- Microphone audio hint: when sustained loud sound is heard but the recognizer
+  yields no words yet, the voice dialog status shows "শব্দ শুনতে পাচ্ছি — গান
+  মেলানো হচ্ছে…" and clears to the regular listening line on transitions.
+  Result channel: RESULT_AUDIO_HINT (voice service -> activity).
+- Behavior intentionally unchanged: typed search, strict voice path, pinned
+  candidate rules, catalogue data, and permissions.
+- Release gate status: signing secrets are NOT yet configured (CI produced
+  ashke-shadek-release-unsigned-apk). Publishing a signed, update.json-backed
+  release requires the permanent-key secrets plus ASHKE_STABLE_RELEASE_READY
+  and a manual dispatch of the Build workflow on main.

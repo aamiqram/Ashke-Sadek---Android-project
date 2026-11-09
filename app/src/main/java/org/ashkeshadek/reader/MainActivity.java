@@ -1511,6 +1511,104 @@ public class MainActivity extends Activity {
         return matched;
     }
 
+    /**
+     * Sung audio garbles words, so the strict word/ordered matcher often rejects
+     * the real song. This fallback scores character n-gram overlap between the
+     * whole transcript and the lyrics. A small sampled sketch keeps the per-song
+     * scan cheap; exact verification runs only for songs whose sketch looks
+     * promising. Calibration: tests/calibrate_voice_fuzzy.py.
+     */
+    private static final int VOICE_GRAM_SIZE = 3;
+    private static final int VOICE_GRAM_SKETCH_LIMIT = 256;
+    /** Sketch recall gate, as a fraction of the lyric grams expected to match. */
+    private static final double VOICE_FUZZY_SKETCH_GATE = 0.40;
+    /**
+     * Exact containment ratio a song must reach before it may be suggested.
+     * Calibration (tests/calibrate_voice_fuzzy.py, seeded over the real
+     * catalogue): 0.40 keeps 96–98% of lightly garbled sung transcripts and
+     * about 35% of heavily garbled ones in the top suggestions, against only
+     * ~0.13 stray conversation candidates per chatter window.
+     */
+    private static final double VOICE_FUZZY_VERIFY_RATIO = 0.40;
+    /** Transcripts keep growing; only the tail window drives the fuzzy score. */
+    private static final int VOICE_FUZZY_QUERY_LIMIT = 260;
+
+    private int scoreVoiceFuzzyMatch(SearchDocument doc, SearchQuery query) {
+        String original = fuzzyVoiceWindow(query.normalized);
+        String modern = fuzzyVoiceWindow(query.modern);
+        int grams = original.length() - VOICE_GRAM_SIZE + 1;
+        if (doc.gramSketch.length == 0 || grams < 10) return 0;
+        double sampleFraction = doc.gramSketch.length / (double) doc.gramCount;
+        int sketchGate = Math.max(2, (int) Math.ceil(
+                sampleFraction * grams * VOICE_FUZZY_SKETCH_GATE));
+        int sketchHits = countGramsInSketch(original, doc.gramSketch);
+        if (sketchHits < sketchGate) return 0;
+        int verified = Math.max(
+                countGramsInText(original, doc.normalized),
+                countGramsInText(modern, doc.modern));
+        double ratio = verified / (double) grams;
+        if (ratio < VOICE_FUZZY_VERIFY_RATIO) return 0;
+        return (int) (420 + ratio * 500);
+    }
+
+    private String fuzzyVoiceWindow(String text) {
+        if (text.length() <= VOICE_FUZZY_QUERY_LIMIT) return text;
+        return text.substring(text.length() - VOICE_FUZZY_QUERY_LIMIT);
+    }
+
+    private static long[] buildGramSketch(String normalized) {
+        int count = normalized.length() - VOICE_GRAM_SIZE + 1;
+        if (count <= 0) return new long[0];
+        int keep = Math.min(count, VOICE_GRAM_SKETCH_LIMIT);
+        long[] sketch = new long[keep];
+        for (int i = 0; i < keep; i++) {
+            int start = (int) ((long) i * count / keep);
+            sketch[i] = gramHash(normalized, start, start + VOICE_GRAM_SIZE);
+        }
+        java.util.Arrays.sort(sketch);
+        return sketch;
+    }
+
+    private static long gramHash(String text, int start, int end) {
+        long hash = 0xcbf29ce484222325L;
+        for (int i = start; i < end; i++) {
+            hash ^= text.charAt(i);
+            hash *= 0x100000001b3L;
+        }
+        return hash;
+    }
+
+    private static boolean sketchContains(long[] sketch, long hash) {
+        int low = 0, high = sketch.length - 1;
+        while (low <= high) {
+            int mid = (low + high) >>> 1;
+            long value = sketch[mid];
+            if (value == hash) return true;
+            if (value < hash) low = mid + 1; else high = mid - 1;
+        }
+        return false;
+    }
+
+    private static int countGramsInSketch(String query, long[] sketch) {
+        int count = query.length() - VOICE_GRAM_SIZE + 1;
+        if (count <= 0) return 0;
+        int hits = 0;
+        for (int i = 0; i < count; i++) {
+            if (sketchContains(sketch, gramHash(query, i, i + VOICE_GRAM_SIZE))) hits++;
+        }
+        return hits;
+    }
+
+    private static int countGramsInText(String query, String text) {
+        int count = query.length() - VOICE_GRAM_SIZE + 1;
+        if (count <= 0) return 0;
+        int hits = 0;
+        for (int i = 0; i < count; i++) {
+            if (text.indexOf(query.substring(i, i + VOICE_GRAM_SIZE)) >= 0) hits++;
+        }
+        return hits;
+    }
+
     private boolean hasPrefixMatch(String query, Set<String> original, Set<String> modern) {
         for (String word : original) if (word.startsWith(query)) return true;
         for (String word : modern) if (word.startsWith(query)) return true;
@@ -2087,6 +2185,18 @@ public class MainActivity extends Activity {
                 } else if (resultCode == VoiceRecognitionService.RESULT_PARTIAL) {
                     if (voiceStatus != null) voiceStatus.setText("শুনছি…\n" + text);
                     renderVoiceCandidates(text);
+                } else if (resultCode == VoiceRecognitionService.RESULT_AUDIO_HINT) {
+                    // Only the status line changes: never the action button
+                    // state, which still belongs to the recognition flow.
+                    if (voiceStatus != null) {
+                        if (!text.isEmpty()) {
+                            voiceStatus.setText(text);
+                        } else if (!latestVoiceTranscript.isEmpty()) {
+                            voiceStatus.setText("শুনছি…\n" + latestVoiceTranscript);
+                        } else {
+                            voiceStatus.setText("শুনছি — একটি ছোট গানের লাইন বলুন।");
+                        }
+                    }
                 } else if (resultCode == VoiceRecognitionService.RESULT_TEXT) {
                     finishVoiceDialog();
                     handleVoiceSearchResult(target, text);
@@ -2264,6 +2374,14 @@ public class MainActivity extends Activity {
         SearchQuery preparedQuery = prepareSearchQuery(query);
         for (Song song : songs) {
             int score = scoreSongMatch(song, preparedQuery, true);
+            // Strict word evidence can vanish entirely when singing garbles the
+            // recognized words. The fuzzy fallback keeps voice suggestions alive
+            // for such transcripts; typed search never runs it.
+            boolean strictEvidence = score >= 300;
+            if (!strictEvidence) {
+                SearchDocument doc = searchIndex.get(song.id);
+                if (doc != null) score = scoreVoiceFuzzyMatch(doc, preparedQuery);
+            }
             if (score >= 300) {
                 VoiceCandidate candidate = voiceCandidateHistory.get(song.id);
                 if (candidate == null) {
@@ -2276,7 +2394,11 @@ public class MainActivity extends Activity {
                 }
                 if (score >= candidate.bestScore) {
                     candidate.bestScore = score;
-                    candidate.excerpt = matchingLyricExcerpt(song, preparedQuery);
+                    // Word-based excerpts only mean something for strict
+                    // matches; fuzzy matches keep the previous excerpt.
+                    if (strictEvidence) {
+                        candidate.excerpt = matchingLyricExcerpt(song, preparedQuery);
+                    }
                 }
                 if (pinnedVoiceCandidateId.isEmpty()
                         || (song.id.equals(pinnedVoiceCandidateId)
@@ -2680,12 +2802,18 @@ public class MainActivity extends Activity {
     private static class SearchDocument {
         final String normalized, modern, phonetic, title;
         final Set<String> words, modernWords, phoneticWords = new HashSet<>();
+        /** Evenly sampled character n-gram hashes of the normalized lyrics. */
+        final long[] gramSketch;
+        /** Total character n-gram count the sketch was sampled from. */
+        final int gramCount;
         SearchDocument(String normalized, String modern, String phonetic, String title,
                        Set<String> words, Set<String> modernWords) {
             this.normalized = normalized; this.modern = modern; this.phonetic = phonetic;
             this.title = title; this.words = words; this.modernWords = modernWords;
             for (String word : words) phoneticWords.add(phoneticizeWord(word));
             for (String word : modernWords) phoneticWords.add(phoneticizeWord(word));
+            this.gramCount = Math.max(0, normalized.length() - VOICE_GRAM_SIZE + 1);
+            this.gramSketch = buildGramSketch(normalized);
         }
     }
 

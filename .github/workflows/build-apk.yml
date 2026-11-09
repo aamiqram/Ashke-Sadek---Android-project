@@ -20,6 +20,9 @@ jobs:
       - name: Validate catalogue, Word formatting, and memory invariants
         run: python3 tests/validate_catalog.py
 
+      - name: Calibrate voice fuzzy fallback thresholds on the real catalogue
+        run: python3 tests/calibrate_voice_fuzzy.py
+
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:

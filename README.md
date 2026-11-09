@@ -46,6 +46,8 @@ The int8 model package contains an encoder of about 26.2 MB, a 2.1 MB decoder, a
 
 **Voice search is speech recognition, not music identification.** It can match a Bengali lyric someone says or sings into the microphone. It does not identify a song from audio playing nearby, and it does not save or upload microphone recordings.
 
+Voice suggestions are always checked against the actual song text. Strict matching needs recognized words from the catalogue in lyric order; when singing or a played song garbles recognition and exact word evidence disappears, a calibrated character n-gram fallback compares the transcript against the six hundred fifteen songs' text directly. The fallback keeps lightly garbled sung transcripts in the suggestions roughly nine times out of ten while rejecting ordinary conversation, and its tolerances are re-checked on every build against the real catalogue (`tests/calibrate_voice_fuzzy.py`). While the microphone hears sustained sound but no words are recognized, the status line says so instead of appearing frozen.
+
 ## Privacy and network use
 
 - Song text, typed queries and speech recognition stay on the phone. There is no analytics or advertising service.

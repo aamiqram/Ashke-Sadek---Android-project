@@ -21,6 +21,13 @@ final class OfflineBengaliVoice {
         void onStatus(String message);
         void onPartial(String text);
         void onResult(String text);
+        /**
+         * Microphone hears sustained sound but the recognizer still produced no
+         * words. Lets the UI tell the reader honestly what the mic hears while
+         * sung audio fails to transcribe into matchable lyrics. A null message
+         * clears the hint back to the regular listening line.
+         */
+        void onAudioHint(String message);
         void onError(String message);
         void onFinished();
     }
@@ -41,6 +48,19 @@ final class OfflineBengaliVoice {
     private volatile boolean stopRequested;
     private volatile boolean sessionCancelled;
     private boolean beginRequested;
+
+    // Microphone-energy sampling for an honest status hint: if the recognizer
+    // keeps producing no words while the mic clearly hears sound (e.g. music
+    // playback or singing that this speech model cannot decode), the UI says so
+    // instead of looking frozen.
+    private static final int AUDIO_HINT_WINDOW = 15; // ~1.5 s at 100 ms chunks
+    private static final int AUDIO_HINT_MIN_LOUD_CHUNKS = 9;
+    private static final int AUDIO_HINT_RMS_FLOOR = 800;
+    private static final String AUDIO_HINT_MESSAGE = "শব্দ শুনতে পাচ্ছি — গান মেলানো হচ্ছে…";
+    private final int[] energyWindow = new int[AUDIO_HINT_WINDOW];
+    private int energyWindowIndex;
+    private int energyWindowFilled;
+    private boolean audioHintActive;
 
     OfflineBengaliVoice(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -180,6 +200,39 @@ final class OfflineBengaliVoice {
         return out;
     }
 
+    /**
+     * Keeps a short rolling window of chunk loudness. When sound is sustained
+     * but no words have been recognized yet (or recognition fell back to
+     * nothing), the listener hears that the microphone really is receiving the
+     * song. Transitions are posted only; steady states never re-send.
+     */
+    private void trackMicrophoneEnergy(short[] pcm, int count, boolean wordsHeard) {
+        long sumOfSquares = 0L;
+        for (int i = 0; i < count; i++) {
+            long sample = pcm[i];
+            sumOfSquares += sample * sample;
+        }
+        int rms = count <= 0 ? 0 : (int) Math.sqrt(sumOfSquares / count);
+        energyWindow[energyWindowIndex] = rms;
+        energyWindowIndex = (energyWindowIndex + 1) % AUDIO_HINT_WINDOW;
+        if (energyWindowFilled < AUDIO_HINT_WINDOW) energyWindowFilled++;
+
+        int loud = 0;
+        for (int value : energyWindow) {
+            if (value >= AUDIO_HINT_RMS_FLOOR) loud++;
+        }
+        boolean soundPresent = energyWindowFilled >= AUDIO_HINT_WINDOW
+                && loud >= AUDIO_HINT_MIN_LOUD_CHUNKS;
+        boolean shouldHint = soundPresent && !wordsHeard;
+        if (shouldHint == audioHintActive) return;
+        audioHintActive = shouldHint;
+        main.post(() -> {
+            if (!sessionCancelled && !releaseRequested) {
+                listener.onAudioHint(shouldHint ? AUDIO_HINT_MESSAGE : null);
+            }
+        });
+    }
+
     private void runRecognition() {
         synchronized (SESSION_LOCK) { runRecognitionLoop(); }
     }
@@ -262,6 +315,10 @@ final class OfflineBengaliVoice {
             }
             status("শুনছি — একটি ছোট গানের লাইন বলুন।");
             short[] buffer = new short[Math.max(1600, input.sampleRate / 10)];
+            java.util.Arrays.fill(energyWindow, 0);
+            energyWindowIndex = 0;
+            energyWindowFilled = 0;
+            audioHintActive = false;
 
             while (!stopRequested && !releaseRequested && !sessionCancelled) {
                 int count = audio.read(buffer, 0, buffer.length);
@@ -270,6 +327,8 @@ final class OfflineBengaliVoice {
                     throw new IllegalStateException("মাইক্রোফোন থেকে অডিও পাওয়া যাচ্ছে না (" + count + ")।");
                 }
                 if (count == 0) continue;
+                trackMicrophoneEnergy(buffer, count,
+                        completedText.length() > 0 || !latestText.isEmpty());
                 float[] samples = toModelSamples(buffer, count, input.sampleRate);
                 if (samples.length == 0) continue;
                 stream.acceptWaveform(samples, MODEL_RATE);

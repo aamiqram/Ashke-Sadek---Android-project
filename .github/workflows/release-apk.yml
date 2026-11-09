@@ -86,18 +86,18 @@ jobs:
             --arg apkUrl "$APK_URL" \
             --arg sha256 "$APK_SHA" \
             --arg certificateSha256 "$CERT_SHA" \
-            --arg releaseNotes "মূল Word lyric emphasis, উন্নত অফলাইন বাংলা ভয়েস সার্চ, কম RAM ব্যবহার এবং যাচাইকৃত ইন-অ্যাপ আপডেট।" \
+            --arg releaseNotes "ভয়েস মিলান এখন গানের লেখার সাথে যুক্ত: গান গাওয়া বা বাজনার শব্দে কথা শনাক্ত না হলেও সম্ভাব্য গান অনুসন্ধান করা হয়, এবং মাইক্রোফোনে শব্দ থাকলে সেটি স্পষ্টভাবে দেখানো হয়।" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,certificateSha256:$certificateSha256,releaseNotes:$releaseNotes}' \
             > update.json
           cat > release-notes.md <<EOF
           ## এশকে ছাদেক Android — ${VERSION_NAME}
 
-          - Bengali offline voice recognition uses the compact int8 streaming model.
-          - Voice recognition runs in an isolated short-lived process.
+          - Voice suggestions are matched against the actual song text: character n-gram containment over the 615-song catalogue tolerates garbled sung transcripts (calibrated in CI on the real catalogue).
+          - The status line states clearly when the microphone hears sound but no words were recognized, so the app never looks frozen during music playback.
+          - Bengali offline voice recognition uses the compact int8 streaming model in an isolated short-lived process.
           - Song lyrics are kept in one canonical copy with original Word paragraph emphasis.
           - Search supports original, modern-spoken and phonetic Bengali variants.
-          - The app checks for releases and verifies APK checksum and signer before installation.
-          - Android still asks the user to confirm an update; same-signer updates preserve app data.
+          - The app verifies the APK checksum and signer before installation; Android asks to confirm the update.
           EOF
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
