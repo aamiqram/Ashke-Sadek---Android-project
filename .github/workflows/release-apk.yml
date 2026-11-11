@@ -94,8 +94,8 @@ jobs:
 
           - Update checks now try a CDN-mirrored manifest first (no GitHub API quota), then the API with one retry; a failed check explains the actual cause (DNS, SSL, timeout, HTTP 403 rate limit).
           - The reading column is wider (432dp) and each printed line gently fits the column instead of wrapping mid-sentence; font-size controls still work.
-          - Voice suggestions are matched against the actual song text: character n-gram containment over the 615-song catalogue tolerates garbled sung transcripts (calibrated in CI on the real catalogue).
-          - The status line states clearly when the microphone hears sound but no words were recognized, so the app never looks frozen during music playback.
+          - The offline voice decoder now carries the songbook's own vocabulary: 3,952 hotword phrases (titles, first-line windows, rare words) generated from the catalogue steer beam search, so sung titles and familiar lines resolve far more often.
+          - A Unicode spelling bridge aligns what the microphone hears with how the book spells it (decomposed nukta letters, ৰ/ৱ, stray marks), and unchanged partial results no longer cross the process boundary, keeping decoding realtime on older phones.
           - Bengali offline voice recognition uses the compact int8 streaming model in an isolated short-lived process.
           - The app verifies the APK checksum and signer before installation; Android asks to confirm the update.
           EOF

@@ -104,6 +104,8 @@ Play Store preparation:
   graphic title now auto-fits one line (88 pt) so nothing overlaps.
 
 Local :app:assembleDebug BUILD SUCCESSFUL with all of the above.
-Next: dispatch Build Android APK on main -> v1.1.41-beta (versionCode 1041)
-which also creates the update-mirror branch; then device QA of voice search
-while watching the decode-load logs.
+Next: dispatch Build Android APK on main after this fix lands -> the version
+auto-derives from the run number (versionCode = 1000 + run_number), so ask the
+run page for the exact number; it is past 1.1.41 because push builds consume
+run numbers too. Then device QA of voice search while watching the decode-load
+logs.

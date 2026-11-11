@@ -4,6 +4,7 @@ from pathlib import Path
 import gzip
 import hashlib
 import json
+import re
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +50,11 @@ assert "searchableWords" not in main_source
 assert "final String text;" not in main_source
 assert "cachedRecognizer" not in voice_source, "ASR model must not remain cached in the UI process"
 assert "recognizer.release()" in voice_source, "ASR session must release its native recognizer"
-assert "model.setNumThreads(1)" in voice_source, "ASR thread count must stay bounded"
+# Beam search + hotword contextual biasing needs a second thread to stay
+# realtime on single-big-core phones; the invariant is that the count stays
+# small and explicit, not that greedy_search's 1 remains.
+thread_counts = [int(match) for match in re.findall(r"model\.setNumThreads\((\d+)\)", voice_source)]
+assert thread_counts and max(thread_counts) <= 2, "ASR thread count must stay bounded"
 assert "Process.killProcess(Process.myPid())" in voice_service, "Voice process must exit after a session"
 assert "voice-model-loaded" in voice_service, "Voice PSS telemetry missing"
 
