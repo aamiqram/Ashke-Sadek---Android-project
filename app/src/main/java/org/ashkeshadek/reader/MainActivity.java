@@ -2609,7 +2609,10 @@ public class MainActivity extends Activity {
     private String normalize(String value){
         if(value==null)return "";
         String s=Normalizer.normalize(value,Normalizer.Form.NFC).toLowerCase(Locale.ROOT).trim();
-        s=s.replace("য়","য়").replace("ড়","ড়").replace("ঢ়","ড়").replace("ৎ","ত");
+        s=s.replace("য়","য়").replace("ড়","ড়")
+                .replace("ঢ়","ড়").replace("ঢ়","ড়")
+                .replace("ৰ","র").replace("ৱ","ও")
+                .replace("়","").replace("ৎ","ত");
         s=NORMALIZE_SEPARATOR_PATTERN.matcher(s).replaceAll("");
         return s;
     }

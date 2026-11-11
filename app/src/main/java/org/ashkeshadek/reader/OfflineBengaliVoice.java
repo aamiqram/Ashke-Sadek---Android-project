@@ -35,6 +35,11 @@ final class OfflineBengaliVoice {
     private static final int MODEL_RATE = 16000;
     private static final int[] CAPTURE_RATES = {16000, 48000, 44100};
     private static final String MODEL_DIR = "sherpa-onnx-bn-vosk-int8-19d0fc5";
+    private static final String HOTWORDS_ASSET = "hotwords.txt";
+    // Moderate contextual bias (sherpa's gentle default): strong enough to pull
+    // sung fragments toward the book's words, gentle enough not to force wrong
+    // songs. Tune toward 1.8 only if transcripts under-detect catalogue words.
+    private static final float HOTWORDS_SCORE = 1.5f;
     private static final Object SESSION_LOCK = new Object();
 
     private final Context context;
@@ -61,6 +66,9 @@ final class OfflineBengaliVoice {
     private int energyWindowIndex;
     private int energyWindowFilled;
     private boolean audioHintActive;
+    private String lastPartialPosted = "";
+    private long fedMillis;
+    private long decodeNanos;
 
     OfflineBengaliVoice(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -140,7 +148,15 @@ final class OfflineBengaliVoice {
         main.post(() -> { if (!sessionCancelled && !releaseRequested) listener.onStatus(value); });
     }
 
+    /**
+     * Posts a transcript preview to the UI only when it actually changed. The
+     * recognizer produces a result for every ~100 ms chunk; without this guard
+     * unchanged text crosses the process boundary dozens of times per second
+     * and burns main-thread time that the :voice decoder needs for beam search.
+     */
     private void partial(String value) {
+        if (value == null || value.equals(lastPartialPosted)) return;
+        lastPartialPosted = value;
         main.post(() -> { if (!sessionCancelled && !releaseRequested) listener.onPartial(value); });
     }
 
@@ -186,16 +202,20 @@ final class OfflineBengaliVoice {
         }
         int size = (int) Math.floor(count * (MODEL_RATE / (double) sourceRate));
         if (size <= 0) return new float[0];
-        float[] out = new float[size];
         double ratio = sourceRate / (double) MODEL_RATE;
+        // Linear interpolation alone folds every harmonic above 8 kHz back
+        // into the speech band, which the model hears as garbage consonants.
+        // A short box average before decimation reduces that aliasing on the
+        // fallback capture paths (48/44.1 kHz devices).
+        int step = (int) Math.round(ratio);
+        if (step < 1) step = 1;
+        float[] out = new float[size];
         for (int i = 0; i < size; i++) {
-            double pos = i * ratio;
-            int left = Math.min((int) pos, count - 1);
-            int right = Math.min(left + 1, count - 1);
-            float fraction = (float) (pos - left);
-            float a = pcm[left] / 32768.0f;
-            float b = pcm[right] / 32768.0f;
-            out[i] = a + (b - a) * fraction;
+            int start = (int) (i * ratio);
+            int end = Math.min(start + step, count);
+            long sum = 0;
+            for (int j = start; j < end; j++) sum += pcm[j];
+            out[i] = sum / (float) (end - start) / 32768.0f;
         }
         return out;
     }
@@ -231,6 +251,21 @@ final class OfflineBengaliVoice {
                 listener.onAudioHint(shouldHint ? AUDIO_HINT_MESSAGE : null);
             }
         });
+    }
+
+    /**
+     * Every five seconds of captured audio, log how much wall-clock time beam
+     * search spent decoding it. A ratio above 1.0 means the phone cannot keep
+     * up with real time: the transcript then lags and may only arrive after
+     * the reader stopped talking. Collected from real device sessions to
+     * decide whether maxActivePaths or the thread count needs per-device
+     * tuning instead of guesses.
+     */
+    private void logDecodeLoad(long fedMs, long decodeNs) {
+        double decodeMs = decodeNs / 1000000.0;
+        Log.i("AshkeShadekVoice", String.format(java.util.Locale.ROOT,
+                "decode-load fedMs=%d decodeMs=%.0f ratio=%.2f",
+                fedMs, decodeMs, decodeMs / fedMs));
     }
 
     private void runRecognition() {
@@ -286,7 +321,9 @@ final class OfflineBengaliVoice {
         OnlineModelConfig model = new OnlineModelConfig();
         model.setTransducer(transducer);
         model.setTokens(MODEL_DIR + "/tokens.txt");
-        model.setNumThreads(1);
+        // Beam search with hotword biasing costs more than greedy decoding;
+        // two threads keep recognition real-time on octa-core Android 7 phones.
+        model.setNumThreads(2);
         model.setDebug(false);
         model.setProvider("cpu");
         model.setModelType("zipformer2");
@@ -294,7 +331,46 @@ final class OfflineBengaliVoice {
         config.setFeatConfig(feature);
         config.setModelConfig(model);
         config.setEnableEndpoint(true);
+        // Contextual biasing toward the songbook: the decoder is guided by the
+        // book's titles, first-line phrases and rare words (asset hotwords.txt,
+        // generated by tools/generate_hotwords.py). Hotwords only apply with
+        // modified_beam_search decoding; a missing file falls back to greedy
+        // search so voice search still works, just unbiased.
+        String hotwordsFile = stageHotwordsFile();
+        if (hotwordsFile.isEmpty()) {
+            config.setDecodingMethod("greedy_search");
+        } else {
+            config.setDecodingMethod("modified_beam_search");
+            config.setMaxActivePaths(4);
+            config.setHotwordsFile(hotwordsFile);
+            config.setHotwordsScore(HOTWORDS_SCORE);
+        }
         return new OnlineRecognizer(context.getAssets(), config);
+    }
+
+    /**
+     * sherpa-onnx reads the hotword list from the filesystem, so stage the
+     * bundled asset into cache storage and return its absolute path. An empty
+     * return keeps the session alive without biasing instead of failing it.
+     */
+    private String stageHotwordsFile() {
+        java.io.File staged = new java.io.File(context.getCacheDir(), HOTWORDS_ASSET);
+        java.io.InputStream in = null;
+        java.io.OutputStream out = null;
+        try {
+            in = context.getAssets().open(HOTWORDS_ASSET);
+            out = new java.io.FileOutputStream(staged);
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
+            return staged.getAbsolutePath();
+        } catch (Exception failure) {
+            Log.w("AshkeShadekVoice", "Hotword file unavailable; continuing unbiased", failure);
+            return "";
+        } finally {
+            try { if (in != null) in.close(); } catch (Exception ignored) { }
+            try { if (out != null) out.close(); } catch (Exception ignored) { }
+        }
     }
 
     private void runListeningSession(OnlineRecognizer recognizer) {
@@ -319,6 +395,9 @@ final class OfflineBengaliVoice {
             energyWindowIndex = 0;
             energyWindowFilled = 0;
             audioHintActive = false;
+            lastPartialPosted = "";
+            fedMillis = 0;
+            decodeNanos = 0;
 
             while (!stopRequested && !releaseRequested && !sessionCancelled) {
                 int count = audio.read(buffer, 0, buffer.length);
@@ -332,7 +411,15 @@ final class OfflineBengaliVoice {
                 float[] samples = toModelSamples(buffer, count, input.sampleRate);
                 if (samples.length == 0) continue;
                 stream.acceptWaveform(samples, MODEL_RATE);
+                long decodeStart = System.nanoTime();
                 while (recognizer.isReady(stream)) recognizer.decode(stream);
+                decodeNanos += System.nanoTime() - decodeStart;
+                fedMillis += count * 1000L / input.sampleRate;
+                if (fedMillis >= 5000) {
+                    logDecodeLoad(fedMillis, decodeNanos);
+                    fedMillis = 0;
+                    decodeNanos = 0;
+                }
 
                 OnlineRecognizerResult result = recognizer.getResult(stream);
                 latestText = result == null || result.getText() == null ? "" : result.getText().trim();
