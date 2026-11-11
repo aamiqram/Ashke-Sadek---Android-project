@@ -42,7 +42,21 @@ Voice-text matching + honest mic feedback (Nov 9, 2026 working tree, awaiting pu
   Result channel: RESULT_AUDIO_HINT (voice service -> activity).
 - Behavior intentionally unchanged: typed search, strict voice path, pinned
   candidate rules, catalogue data, and permissions.
-- Release gate status: signing secrets are NOT yet configured (CI produced
-  ashke-shadek-release-unsigned-apk). Publishing a signed, update.json-backed
-  release requires the permanent-key secrets plus ASHKE_STABLE_RELEASE_READY
-  and a manual dispatch of the Build workflow on main.
+- Release gate status (Nov 10): permanent signing configured in repo secrets;
+  v1.1.40-beta (versionCode 1040) published and verified — cert CN=Ashke Shadek,
+  3-way SHA-256 match, update.json present. In-app updates are live on the
+  permanent key; one uninstall/reinstall was needed only for old debug-signed
+  beta installs.
+
+Nov 12, 2026 working tree (awaiting push) — Android 7 device feedback fixes:
+
+- Updater robustness: check the raw update-mirror branch (CDN, no API quota)
+  first, then the GitHub API with one retry; HTTP 403 rate-limit detection;
+  failures now classify DNS/SSL/timeout/connection errors in Bengali so the
+  dialog itself explains the cause instead of blaming the internet.
+- release-apk.yml pushes update.json to the orphan update-mirror branch after
+  every signed release; the branch is force-replaced each publish.
+- Reader layout: book column widened 336dp -> 432dp (matches ~39-char printed
+  lines), text-size baseline moved to the new column width, and each printed
+  line now gently shrinks (min 72%) to stay on one screen line instead of
+  wrapping mid-sentence like the printed book never does.

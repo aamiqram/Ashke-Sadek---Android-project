@@ -1207,15 +1207,18 @@ public class MainActivity extends Activity {
 
             @Override public void onError(String message) {
                 Log.i("AshkeUpdater", "Update check failed: " + message);
-                if (userInitiated) showUpdateCheckUnavailable();
+                if (userInitiated) showUpdateCheckUnavailable(message);
             }
         });
     }
 
-    private void showUpdateCheckUnavailable() {
+    private void showUpdateCheckUnavailable(String reason) {
         new AlertDialog.Builder(this)
                 .setTitle("আপডেট পরীক্ষা করা যাচ্ছে না")
-                .setMessage("ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন। আপনার গান পড়া ও অন্যান্য অফলাইন সুবিধা ব্যবহার করতে পারবেন।")
+                .setMessage((reason == null || reason.trim().isEmpty()
+                        ? "কারণ জানা যায়নি।" : reason.trim())
+                        + "\n\nইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন। "
+                        + "আপনার গান পড়া ও অন্যান্য অফলাইন সুবিধা ব্যবহার করতে পারবেন।")
                 .setPositiveButton("আবার চেষ্টা করুন", (dialog, which) -> checkForAppUpdates(true))
                 .setNegativeButton("ঠিক আছে", null)
                 .show();
@@ -1735,9 +1738,11 @@ public class MainActivity extends Activity {
                 / getResources().getDisplayMetrics().density;
         int availableWidth = Math.max(dp(168),
                 getResources().getDisplayMetrics().widthPixels - dp(24));
-        // Use a fixed book column on normal phones so the same lyric paragraphs
-        // wrap consistently on Android 7 and newer, wider devices.
-        readerPageWidthPx = Math.min(availableWidth, dp(336));
+        // Wider book column: the original printed lines average ~39 characters, so the
+        // old 336dp column re-wrapped almost every printed line at a readable font.
+        // 432dp holds a complete printed line on normal phones; narrower screens keep
+        // a proportionally scaled font so the wrap points stay book-like everywhere.
+        readerPageWidthPx = Math.min(availableWidth, dp(432));
         readerTextMeasurePx = Math.max(dp(132), readerPageWidthPx - dp(36));
 
         LinearLayout textSizeControls = new LinearLayout(this);
@@ -2000,6 +2005,30 @@ public class MainActivity extends Activity {
             lyricLine.setPadding(0, 0,
                     responsiveWordMeasure(block.rightIndentPt, textMeasure, wordTextWidthPt), 0);
             lyricLine.setTextIsSelectable(true);
+            // Keep every printed line on one screen line whenever possible: when an
+            // original line slightly overflows the column, shrink the font just for
+            // that line instead of wrapping mid-sentence — the printed book never
+            // breaks these lines, so wrapping here looks wrong to the reader.
+            if (!blockText.contains("\n")) {
+                int rightIndent = responsiveWordMeasure(
+                        block.rightIndentPt, textMeasure, wordTextWidthPt);
+                int targetWidth = textMeasure - leftIndent - firstIndent - rightIndent;
+                if (targetWidth > 0) {
+                    android.text.TextPaint plainPaint =
+                            new android.text.TextPaint(lyricLine.getPaint());
+                    android.text.TextPaint boldPaint = new android.text.TextPaint(plainPaint);
+                    boldPaint.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+                    float measuredWidth = Math.max(plainPaint.measureText(blockText),
+                            boldPaint.measureText(blockText));
+                    if (measuredWidth > targetWidth) {
+                        float fitScale = Math.max(0.72f, targetWidth / measuredWidth);
+                        if (fitScale < 0.985f) {
+                            lyricLine.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP,
+                                    lyricSizeSp * fitScale);
+                        }
+                    }
+                }
+            }
             LinearLayout.LayoutParams lyricParams = matchWrap();
             lyricParams.topMargin = responsiveWordMeasure(
                     block.spaceBeforePt, textMeasure, wordTextWidthPt);
@@ -2020,7 +2049,9 @@ public class MainActivity extends Activity {
 
     private int effectiveReaderTextSizeSp(float screenWidthDp) {
         int preferred = currentReaderTextSizeSp(screenWidthDp);
-        float standardTextWidth = dp(300);
+        // Match the widened book column: dp(396) is the 432dp page minus its gutters,
+        // so phones with the full column keep the reader's chosen size unchanged.
+        float standardTextWidth = dp(396);
         float widthScale = standardTextWidth <= 0 ? 1f : readerTextMeasurePx / standardTextWidth;
         return Math.max(8, Math.round(preferred * widthScale));
     }

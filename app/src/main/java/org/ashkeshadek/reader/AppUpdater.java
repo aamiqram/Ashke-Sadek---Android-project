@@ -35,6 +35,11 @@ final class AppUpdater {
             "https://api.github.com/repos/aamiqram/Ashke-Sadek---Android-project/releases?per_page=10";
     private static final String RELEASE_ASSET_PREFIX =
             "https://github.com/aamiqram/Ashke-Sadek---Android-project/releases/download/";
+    // Raw CDN mirror of the newest update.json (orphan branch pushed by the
+    // release workflow). raw.githubusercontent.com has no per-IP API quota, so
+    // shared broadband/carrier addresses can never exhaust it.
+    private static final String MIRROR_MANIFEST_URL =
+            "https://raw.githubusercontent.com/aamiqram/Ashke-Sadek---Android-project/update-mirror/update.json";
     private static final String PREFS = "ashke_update_state";
     private static final String PENDING_PATH = "pending_path";
     private static final String PENDING_SHA = "pending_sha";
@@ -85,59 +90,159 @@ final class AppUpdater {
     static void checkForUpdates(Context context, CheckCallback callback) {
         Context app = context.getApplicationContext();
         new Thread(() -> {
+            long installedVersion;
+            String installedCertificate;
             try {
-                long installedVersion = installedVersionCode(app);
-                String installedCertificate = installedCertificate(app);
-                JSONArray releases = new JSONArray(readText(RELEASES_API, 1024 * 1024));
-                UpdateInfo newest = null;
+                installedVersion = installedVersionCode(app);
+                installedCertificate = installedCertificate(app);
+            } catch (Exception error) {
+                MAIN.post(() -> callback.onError(describeNetworkFailure(error)));
+                return;
+            }
 
-                for (int i = 0; i < releases.length(); i++) {
-                    JSONObject release = releases.getJSONObject(i);
-                    if (release.optBoolean("draft", false)) continue;
-                    JSONArray assets = release.optJSONArray("assets");
-                    if (assets == null) continue;
-                    String manifestUrl = null;
-
-                    for (int j = 0; j < assets.length(); j++) {
-                        JSONObject asset = assets.getJSONObject(j);
-                        if ("update.json".equals(asset.optString("name"))) {
-                            manifestUrl = asset.optString("browser_download_url", "");
+            Exception failure = null;
+            UpdateInfo newest = null;
+            boolean mirrorAnswered = false;
+            // Mirror first: one CDN request with no API quota. A stale mirror is
+            // tolerated by re-confirming against the API without failing the
+            // check; the API escalates to a visible error only when the mirror
+            // itself could not be reached.
+            try {
+                newest = newestFromMirror(installedVersion, installedCertificate);
+                mirrorAnswered = true;
+            } catch (Exception error) {
+                failure = error;
+            }
+            if (newest == null && !mirrorAnswered) {
+                Exception apiFailure = null;
+                for (int attempt = 0; attempt < 2 && newest == null; attempt++) {
+                    if (attempt > 0) {
+                        try {
+                            Thread.sleep(1500L);
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
                             break;
                         }
                     }
-                    if (manifestUrl == null || !manifestUrl.startsWith(RELEASE_ASSET_PREFIX)) continue;
-
-                    JSONObject manifest = new JSONObject(readText(manifestUrl, 128 * 1024));
-                    long versionCode = manifest.getLong("versionCode");
-                    if (versionCode <= installedVersion
-                            || (newest != null && versionCode <= newest.versionCode)) continue;
-
-                    String apkUrl = manifest.optString("apkUrl", "");
-                    String sha = manifest.optString("sha256", "");
-                    String cert = manifest.optString("certificateSha256", "");
-                    if (!apkUrl.startsWith(RELEASE_ASSET_PREFIX) || !isSha256(sha) || !isSha256(cert)) {
-                        continue;
+                    try {
+                        newest = newestFromReleasesApi(installedVersion, installedCertificate);
+                        apiFailure = null;
+                    } catch (Exception error) {
+                        apiFailure = error;
                     }
-
-                    newest = new UpdateInfo(versionCode,
-                            manifest.optString("versionName", "নতুন সংস্করণ"),
-                            apkUrl, sha, cert,
-                            manifest.optString("releaseNotes", ""),
-                            release.optString("html_url", ""),
-                            !sameFingerprint(installedCertificate, cert));
                 }
-
-                UpdateInfo result = newest;
-                MAIN.post(() -> {
-                    if (result == null) callback.onNoUpdate();
-                    else callback.onUpdateAvailable(result);
-                });
-            } catch (Exception error) {
-                String message = error.getMessage();
-                MAIN.post(() -> callback.onError(message == null
-                        ? "এখন আপডেট খোঁজা যাচ্ছে না। পরে আবার চেষ্টা করুন।" : message));
+                if (newest == null && apiFailure != null) failure = apiFailure;
+            } else if (newest == null) {
+                // Mirror answered "already current". Confirm once against the API
+                // in case the mirror is stale; ignore API failures here so a
+                // rate-limited shared IP can never fake an error.
+                try {
+                    newest = newestFromReleasesApi(installedVersion, installedCertificate);
+                } catch (Exception ignored) {
+                    // The mirror answer stands.
+                }
             }
+            if (newest != null) failure = null; // an authoritative answer was reached
+
+            Exception reported = failure;
+            UpdateInfo result = newest;
+            MAIN.post(() -> {
+                if (result != null) callback.onUpdateAvailable(result);
+                else if (reported != null) callback.onError(describeNetworkFailure(reported));
+                else callback.onNoUpdate();
+            });
         }, "ashke-update-check").start();
+    }
+
+    /** Newest manifest straight from the raw CDN mirror; null when the app is current. */
+    private static UpdateInfo newestFromMirror(long installedVersion, String installedCertificate)
+            throws Exception {
+        JSONObject manifest = new JSONObject(readText(MIRROR_MANIFEST_URL, 128 * 1024));
+        long versionCode = manifest.getLong("versionCode");
+        if (versionCode <= installedVersion) return null;
+        String apkUrl = manifest.optString("apkUrl", "");
+        String sha = manifest.optString("sha256", "");
+        String cert = manifest.optString("certificateSha256", "");
+        if (!apkUrl.startsWith(RELEASE_ASSET_PREFIX) || !isSha256(sha) || !isSha256(cert)) {
+            throw new IllegalStateException("মিরর ম্যানিফেস্টে আপডেটের তথ্য অসম্পূর্ণ।");
+        }
+        String versionName = manifest.optString("versionName", "নতুন সংস্করণ");
+        return new UpdateInfo(versionCode, versionName, apkUrl, sha, cert,
+                manifest.optString("releaseNotes", ""),
+                "https://github.com/aamiqram/Ashke-Sadek---Android-project/releases/tag/v"
+                        + versionName,
+                !sameFingerprint(installedCertificate, cert));
+    }
+
+    private static UpdateInfo newestFromReleasesApi(long installedVersion,
+                                                    String installedCertificate) throws Exception {
+        JSONArray releases = new JSONArray(readText(RELEASES_API, 1024 * 1024));
+        UpdateInfo newest = null;
+
+        for (int i = 0; i < releases.length(); i++) {
+            JSONObject release = releases.getJSONObject(i);
+            if (release.optBoolean("draft", false)) continue;
+            JSONArray assets = release.optJSONArray("assets");
+            if (assets == null) continue;
+            String manifestUrl = null;
+
+            for (int j = 0; j < assets.length(); j++) {
+                JSONObject asset = assets.getJSONObject(j);
+                if ("update.json".equals(asset.optString("name"))) {
+                    manifestUrl = asset.optString("browser_download_url", "");
+                    break;
+                }
+            }
+            if (manifestUrl == null || !manifestUrl.startsWith(RELEASE_ASSET_PREFIX)) continue;
+
+            JSONObject manifest = new JSONObject(readText(manifestUrl, 128 * 1024));
+            long versionCode = manifest.getLong("versionCode");
+            if (versionCode <= installedVersion
+                    || (newest != null && versionCode <= newest.versionCode)) continue;
+
+            String apkUrl = manifest.optString("apkUrl", "");
+            String sha = manifest.optString("sha256", "");
+            String cert = manifest.optString("certificateSha256", "");
+            if (!apkUrl.startsWith(RELEASE_ASSET_PREFIX) || !isSha256(sha) || !isSha256(cert)) {
+                continue;
+            }
+
+            newest = new UpdateInfo(versionCode,
+                    manifest.optString("versionName", "নতুন সংস্করণ"),
+                    apkUrl, sha, cert,
+                    manifest.optString("releaseNotes", ""),
+                    release.optString("html_url", ""),
+                    !sameFingerprint(installedCertificate, cert));
+        }
+
+        return newest;
+    }
+
+    /**
+     * Explains a failed update check in Bengali with the underlying cause class,
+     * so "no internet" complaints can be diagnosed from the dialog itself.
+     */
+    private static String describeNetworkFailure(Exception error) {
+        if (error == null) return "আপডেট খোঁজা যায়নি।";
+        String detail = error.getMessage();
+        if (detail != null && detail.length() > 140) detail = detail.substring(0, 140) + "…";
+        String suffix = detail == null || detail.trim().isEmpty() ? "" : "\n" + detail.trim();
+        if (error instanceof java.net.UnknownHostException) {
+            return "ইন্টারনেট ঠিকানা (DNS) পাওয়া যায়নি — ওয়াই-ফাই বা মোবাইল ডেটা পুনরায় পরীক্ষা করুন।" + suffix;
+        }
+        if (error instanceof javax.net.ssl.SSLException) {
+            return "নিরাপদ সংযোগ (SSL) স্থাপন করা যায়নি।" + suffix;
+        }
+        if (error instanceof java.net.SocketTimeoutException) {
+            return "সংযোগে সময় শেষ — নেটওয়ার্ক ধীর বা ব্যস্ত।" + suffix;
+        }
+        if (error instanceof java.net.ConnectException) {
+            return "সার্ভারে সংযোগ করা যায়নি।" + suffix;
+        }
+        if (error instanceof java.net.SocketException || error instanceof java.io.IOException) {
+            return "সংযোগ মাঝপথে বিচ্ছিন্ন হয়েছে।" + suffix;
+        }
+        return "আপডেট খোঁজা যায়নি।" + suffix;
     }
 
     static void downloadAndInstall(Activity activity, UpdateInfo update, InstallCallback callback) {
@@ -385,7 +490,8 @@ final class AppUpdater {
     }
 
     private static String readText(String url, int maxBytes) throws Exception {
-        if (!url.startsWith(RELEASE_ASSET_PREFIX) && !url.equals(RELEASES_API)) {
+        if (!url.startsWith(RELEASE_ASSET_PREFIX) && !url.equals(RELEASES_API)
+                && !url.equals(MIRROR_MANIFEST_URL)) {
             throw new IllegalStateException("অনুমোদিত আপডেট ঠিকানা নয়।");
         }
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
@@ -397,6 +503,11 @@ final class AppUpdater {
         try {
             int response = connection.getResponseCode();
             if (response < 200 || response >= 300) {
+                String remaining = connection.getHeaderField("X-RateLimit-Remaining");
+                if (response == 403 && "0".equals(remaining)) {
+                    throw new IllegalStateException(
+                            "GitHub অনুরোধ-সীমা শেষ (HTTP 403) — ভাগ করা ইন্টারনেটে সাধারণ; কিছুক্ষণ পর আবার চেষ্টা করুন।");
+                }
                 throw new IllegalStateException("আপডেট সার্ভার সাড়া দেয়নি (HTTP " + response + ")।");
             }
             try (InputStream input = new BufferedInputStream(connection.getInputStream());
