@@ -60,3 +60,50 @@ Nov 12, 2026 working tree (awaiting push) — Android 7 device feedback fixes:
   lines), text-size baseline moved to the new column width, and each printed
   line now gently shrinks (min 72%) to stay on one screen line instead of
   wrapping mid-sentence like the printed book never does.
+
+Nov 12, 2026 working tree (awaiting push) - the voice bridge shipped + Play Store prep:
+
+Machine side of the voice bridge (teaching the offline decoder the book's words):
+
+- tools/generate_hotwords.py generates app/src/main/assets/hotwords.txt from the
+  bundled catalogue: 608 titles, 1169 first-line windows, 2200 rare words =
+  3952 phrases (152 KB); every phrase is validated against the model's real
+  tokenizer so the runtime can never fail to load the file.
+- Model fact discovered and handled: the book stores য়/ড়/ঢ় decomposed
+  (letter + U+09BC) while the tokenizer knows only the precomposed codepoints;
+  Unicode NFC does NOT compose these pairs at all on this toolchain. Explicit
+  composition now lives in the generator and in MainActivity.normalize().
+- normalize() bridge completed: decomposed nukta pairs -> precomposed, the
+  precomposed ঢ় -> ড় collapse kept, ৰ -> র and ৱ -> ও added
+  (transcripts can never contain the Assamese letters), stray nukta stripped.
+  Applies to corpus, queries, fuzzy grams and phonetic keys - never to
+  displayed text, so lyric emphasis spans stay aligned.
+- Recognizer now decodes with modified_beam_search + hotwords (score 1.5,
+  maxActivePaths 4, 2 threads) and falls back to greedy_search if the asset is
+  missing. Verified against the sherpa-onnx v2.0.1 source: createStream("")
+  still receives the config hotwords for each stream (the per-stream empty
+  context appends the file hotwords - not a kill switch).
+- Capture hardening: unchanged partial texts no longer cross the process
+  boundary on every ~100 ms chunk; decode load is logged every 5 s of audio
+  ("decode-load fedMs=.. ratio=..") so device sessions show whether beam search
+  keeps real time on Android 7 hardware; the 48/44.1 kHz fallback capture now
+  box-filters before decimation instead of folding >8 kHz harmonics into the
+  speech band as garbage consonants.
+
+Play Store preparation:
+
+- CI build-apk.yml now also builds :app:bundleRelease and uploads the signed
+  (or unsigned) app-release.aab as artifacts.
+- play-store/: README.md (browser checklist incl. the 20-tester / 14-day
+  closed-test rule for new personal accounts, the "same key as upload"
+  signing choice, and the REQUEST_INSTALL_PACKAGES review risk with the
+  planned play-flavor fix), listing.md (bn/en title, short + full
+  descriptions, Books & Reference), privacy-policy.html (bilingual:
+  RECORD_AUDIO on-device only, INTERNET = update check only).
+- app-icon-512.png and feature-graphic.png visually verified; the feature
+  graphic title now auto-fits one line (88 pt) so nothing overlaps.
+
+Local :app:assembleDebug BUILD SUCCESSFUL with all of the above.
+Next: dispatch Build Android APK on main -> v1.1.41-beta (versionCode 1041)
+which also creates the update-mirror branch; then device QA of voice search
+while watching the decode-load logs.

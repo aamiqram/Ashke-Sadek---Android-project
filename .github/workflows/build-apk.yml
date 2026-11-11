@@ -80,7 +80,7 @@ jobs:
           APP_VERSION_NAME="1.1.${APP_RUN_NUMBER}-beta"
           echo "APP_VERSION_CODE=$APP_VERSION_CODE" >> "$GITHUB_ENV"
           echo "APP_VERSION_NAME=$APP_VERSION_NAME" >> "$GITHUB_ENV"
-          gradle --no-daemon :app:assembleDebug :app:assembleRelease \
+          gradle --no-daemon :app:assembleDebug :app:assembleRelease :app:bundleRelease \
             -PappVersionCode="$APP_VERSION_CODE" -PappVersionName="$APP_VERSION_NAME"
 
       - name: Upload installable debug APK for QA only
@@ -97,6 +97,24 @@ jobs:
         with:
           name: ashke-shadek-signed-release-apk
           path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload signed release AAB for the Play Store
+        if: steps.signing.outputs.configured == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashke-shadek-signed-release-aab
+          path: app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload unsigned release AAB for QA only
+        if: steps.signing.outputs.configured != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashke-shadek-release-unsigned-aab
+          path: app/build/outputs/bundle/release/app-release-unsigned.aab
           if-no-files-found: error
           retention-days: 14
 
