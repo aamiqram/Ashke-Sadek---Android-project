@@ -143,6 +143,10 @@ public class MainActivity extends Activity {
     private LinearLayout root;
     private LinearLayout page;
     private String currentScreen = "home";
+    /** Width at which the currently mounted screen was laid out; rotation
+     * re-renders only after the width has moved this far, so transition
+     * states never thrash a full remount. */
+    private int lastRenderedWidthPx;
     private Song currentSong;
     private ListView readerList;
     private List<Song> readerBookSongs = Collections.emptyList();
@@ -209,6 +213,7 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 23) lightSystemBars |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
         if (Build.VERSION.SDK_INT >= 26) lightSystemBars |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         if (lightSystemBars != 0) getWindow().getDecorView().setSystemUiVisibility(lightSystemBars);
+        lastRenderedWidthPx = getResources().getDisplayMetrics().widthPixels;
         renderHome();
         loadCatalogInBackground();
         long lastUpdateCheck = prefs.getLong("last_update_check_ms", 0L);
@@ -1749,7 +1754,11 @@ public class MainActivity extends Activity {
         // old 336dp column re-wrapped almost every printed line at a readable font.
         // 432dp holds a complete printed line on normal phones; narrower screens keep
         // a proportionally scaled font so the wrap points stay book-like everywhere.
-        readerPageWidthPx = Math.min(availableWidth, dp(432));
+        // Landscape trades the phone's extra rotated width for a wider (still
+        // book-bounded) column instead of dead margins on both sides.
+        boolean wide = getResources().getDisplayMetrics().widthPixels
+                >= getResources().getDisplayMetrics().heightPixels;
+        readerPageWidthPx = Math.min(availableWidth, wide ? dp(660) : dp(432));
         readerTextMeasurePx = Math.max(dp(132), readerPageWidthPx - dp(36));
 
         LinearLayout textSizeControls = new LinearLayout(this);
@@ -2045,6 +2054,10 @@ public class MainActivity extends Activity {
         // so phones with the full column keep the reader's chosen size unchanged.
         float standardTextWidth = dp(396);
         float widthScale = standardTextWidth <= 0 ? 1f : readerTextMeasurePx / standardTextWidth;
+        // A wider column (landscape) fits more text per line but must never
+        // inflate the reader's chosen size; only narrower-than-standard
+        // columns scale the size down.
+        if (widthScale > 1f) widthScale = 1f;
         return Math.max(8, Math.round(preferred * widthScale));
     }
 
@@ -2749,6 +2762,31 @@ public class MainActivity extends Activity {
         }
         else if(!currentScreen.equals("home"))renderHome();
         else super.onBackPressed();
+    }
+
+    /**
+     * Rotation no longer recreates the activity (configChanges in the
+     * manifest), so the catalog never re-parses, dialogs stay open and a
+     * live voice session is untouched — but the mounted views keep the old
+     * width. Re-mount the screen by hand once the width has genuinely moved;
+     * the reader preserves its scroll position across the rebuild.
+     */
+    @Override public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        int width = getResources().getDisplayMetrics().widthPixels;
+        if (Math.abs(width - lastRenderedWidthPx) < dp(48)) return;
+        lastRenderedWidthPx = width;
+        if ("reader".equals(currentScreen) && currentSong != null) {
+            saveReaderPosition();
+            renderReader(currentSong);
+        } else if ("index".equals(currentScreen)) {
+            renderIndex();
+        } else if ("home".equals(currentScreen) || "volume".equals(currentScreen)
+                || "feedback".equals(currentScreen)) {
+            renderHome();
+        }
+        // "loading" / "loading-error": the catalog callback mounts the next
+        // screen at the new width on its own.
     }
 
     private void saveReaderPosition() {

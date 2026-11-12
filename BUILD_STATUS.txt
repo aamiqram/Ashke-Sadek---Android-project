@@ -228,3 +228,74 @@ release-key-signed so it installs straight over v1.1.46-beta). Next: push
 consumes run #48; user dispatch = run #49 -> v1.1.49-beta / 1049. Phase 2
 (glass design system + book feel) and Phase 3 (voice tuning on recorded
 audio) follow after the release.
+
+---
+
+Nov 12, 2026 working tree (awaiting push) - dual-mode capture, hardware
+effects, landscape rotation (Phase 2 begins):
+
+Voice receiving (the "what I say is what it must hear" round):
+
+- Dual-mode capture: OfflineBengaliVoice gains MODE_SPEECH/MODE_SONG and a
+  (Context, captureMode, Listener) constructor. Speech mode keeps
+  VOICE_RECOGNITION -> MIC (the CDD's recognizer-tuned source). Song mode
+  keeps the room signal untouched: UNPROCESSED (only when
+  AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED is "true") ->
+  CAMCORDER -> VOICE_RECOGNITION -> MIC, with no effects attached.
+- Key correction no external advice caught: AcousticEchoCanceler cancels
+  THIS phone's own loudspeaker playback - correct for speech (music
+  another app plays stops masking the reader's voice), catastrophic for
+  song capture (it would erase the very signal being recorded). So
+  NS+AEC attach only in speech mode; AutomaticGainControl is deliberately
+  never attached (the CDD keeps recognition sources AGC-free; pumped gain
+  between words is the model's worst input).
+- Speech effects: NoiseSuppressor + AcousticEchoCanceler created on the
+  capture session, setEnabled(true), state reported via getEnabled(),
+  released in the session finally-block. (setEnabled()'s return type is
+  not boolean here - `x != null && x.setEnabled(true)` fails to compile;
+  report via getEnabled() instead.)
+- VoiceRecognitionService EXTRA_MODE ("speech"/"song") + ensureCaptureMode():
+  a mode change is the one case where the warm engine is released and
+  reloaded (~8 s on the Note 4); ordinary sessions reuse the warm engine
+  untouched. A prewarm load caught mid-flight is demoted from foreground
+  and its notification removed with it, or it would linger forever.
+- New telemetry (tag AshkeShadekVoice): voice-capture source/rate/mode at
+  capture start, voice-capture-effects ns=/aec= after attach,
+  voice-transcript partial=/final= for every partial and final - the data
+  Phase 3 tuning will mine.
+- On-device proof (Note 4, Android 7): tap -> instant warm session,
+  voice-capture source=6 rate=16000 mode=speech, voice-capture-effects
+  ns=on aec=on, decode-load ratio 0.29-0.34 steady. Transcript-accuracy
+  tuning waits for tomorrow's SPEAK/SING recordings
+  (C:\Projects\AAMI\Ashke-Sadek-Recordings\). Song-mode UI + 300-3400 Hz
+  band-pass deliberately deferred until those recordings give tuning data.
+
+Landscape rotation (the reader finally uses the rotated width):
+
+- Root cause of "the app stays portrait in landscape": the manifest never
+  locked orientation - rotation recreated the activity (catalog re-parse
+  flash, dialogs and voice state dropped) - and the reading column capped
+  at 432dp regardless of width.
+- Fix: MainActivity now declares configChanges="orientation|screenSize|
+  screenLayout|keyboardHidden", so rotation no longer recreates the
+  activity. onConfigurationChanged re-mounts by hand once the width moves
+  >= 48dp (mid-transition states never thrash): the reader keeps its
+  scroll position and re-renders, index re-renders via renderIndex(),
+  home/volume/feedback fall back to renderHome(), loading screens are
+  left to the catalog callback. lastRenderedWidthPx seeds in onCreate.
+- Landscape column: renderReader caps at dp(660) in landscape / dp(432)
+  portrait - the rotated width becomes a wider (still book-bounded) page
+  instead of dead margins. effectiveReaderTextSizeSp clamps widthScale to
+  <= 1: a wider column never inflates the reader's chosen size; only
+  narrower-than-standard columns scale down.
+- On-device proof (Note 4): portrait -> landscape mid-song: no catalog
+  reload (zero new AshkeStartup lines), same song at the same chosen 16sp,
+  the two-line song title fits one line wide; rotating back restores the
+  reading position.
+
+Release: this push consumes run #50 (build); user dispatch = run #51 ->
+v1.1.51-beta / versionCode 1051. Phase 2 continues next: glass design
+tokens + reader page ("glass without blur" pre-API 31 - translucent
+panels, hairline borders, pre-baked blurred backdrop - real RenderEffect
+on 12+, RAM-aware), book-feel kit. Phase 3 (voice tuning on the recorded
+takes) starts when the recordings land.

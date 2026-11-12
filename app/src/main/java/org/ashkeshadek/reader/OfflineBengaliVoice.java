@@ -4,6 +4,8 @@ import android.content.Context;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
+import android.media.audiofx.AcousticEchoCanceler;
+import android.media.audiofx.NoiseSuppressor;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -70,9 +72,20 @@ final class OfflineBengaliVoice {
     private long fedMillis;
     private long decodeNanos;
 
+    /** Capture modes: speech = the reader speaks near the phone; song = the phone hears a song from elsewhere. */
+    public static final int MODE_SPEECH = 0;
+    public static final int MODE_SONG = 1;
+
+    private final int captureMode;
+
     OfflineBengaliVoice(Context context, Listener listener) {
+        this(context, MODE_SPEECH, listener);
+    }
+
+    OfflineBengaliVoice(Context context, int captureMode, Listener listener) {
         this.context = context.getApplicationContext();
         this.listener = listener;
+        this.captureMode = captureMode;
     }
 
     synchronized void start() {
@@ -156,6 +169,7 @@ final class OfflineBengaliVoice {
      */
     private void partial(String value) {
         if (value == null || value.equals(lastPartialPosted)) return;
+        Log.i("AshkeShadekVoice", "voice-transcript partial=" + value);
         lastPartialPosted = value;
         main.post(() -> { if (!sessionCancelled && !releaseRequested) listener.onPartial(value); });
     }
@@ -173,8 +187,16 @@ final class OfflineBengaliVoice {
         }
     }
 
+    /**
+     * Speech sessions use VOICE_RECOGNITION first: the Android compatibility
+     * definition tunes that source for recognizers (flat response, no default
+     * gain riding). Song sessions keep the room signal untouched — see
+     * songModeSources().
+     */
     private AudioInput createAudioInput() {
-        int[] sources = {MediaRecorder.AudioSource.VOICE_RECOGNITION, MediaRecorder.AudioSource.MIC};
+        int[] sources = captureMode == MODE_SONG
+                ? songModeSources()
+                : new int[]{MediaRecorder.AudioSource.VOICE_RECOGNITION, MediaRecorder.AudioSource.MIC};
         for (int source : sources) {
             for (int rate : CAPTURE_RATES) {
                 int min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO,
@@ -185,6 +207,9 @@ final class OfflineBengaliVoice {
                     candidate = new AudioRecord(source, rate, AudioFormat.CHANNEL_IN_MONO,
                             AudioFormat.ENCODING_PCM_16BIT, Math.max(min * 2, rate * 2 / 5));
                     if (candidate.getState() == AudioRecord.STATE_INITIALIZED) {
+                        Log.i("AshkeShadekVoice", "voice-capture source=" + source
+                                + " rate=" + rate + " mode=" + (captureMode == MODE_SONG ? "song" : "speech"));
+                        if (captureMode == MODE_SPEECH) attachSpeechEffects(candidate);
                         return new AudioInput(candidate, rate);
                     }
                 } catch (IllegalArgumentException ignored) { }
@@ -192,6 +217,96 @@ final class OfflineBengaliVoice {
             }
         }
         throw new IllegalStateException("এই ফোনের মাইক্রোফোনে সমর্থিত অডিও রেট পাওয়া যায়নি।");
+    }
+
+    /**
+     * Song capture wants the room exactly as the microphone heard it.
+     * AcousticEchoCanceler cancels this phone's OWN loudspeaker playback —
+     * the very signal this mode is trying to hear — and NoiseSuppressor
+     * treats sustained music as removable noise, so neither effect may run
+     * here. UNPROCESSED is only tried on devices that declare an
+     * unprocessed-capable microphone (Android 7+ property); CAMCORDER is the
+     * classic distant-subject capture path and usually avoids the
+     * voice-shaped processing of the recognition sources.
+     */
+    private int[] songModeSources() {
+        if (android.os.Build.VERSION.SDK_INT >= 24) {
+            android.media.AudioManager manager =
+                    (android.media.AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            String unprocessed = manager == null ? null
+                    : manager.getProperty(android.media.AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED);
+            if ("true".equals(unprocessed)) {
+                return new int[]{MediaRecorder.AudioSource.UNPROCESSED,
+                        MediaRecorder.AudioSource.CAMCORDER,
+                        MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                        MediaRecorder.AudioSource.MIC};
+            }
+            Log.i("AshkeShadekVoice", "voice-capture unprocessed=unsupported");
+        }
+        return new int[]{MediaRecorder.AudioSource.CAMCORDER,
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                MediaRecorder.AudioSource.MIC};
+    }
+
+    private NoiseSuppressor noiseSuppressor;
+    private AcousticEchoCanceler echoCanceler;
+
+    /**
+     * Speech capture attaches the phone's hardware NoiseSuppressor and
+     * AcousticEchoCanceler when the device ships them. AEC matters most: it
+     * removes this phone's own speaker output, so music another app is
+     * playing stops masking the reader's voice. AutomaticGainControl is
+     * deliberately NOT attached: the Android CDD keeps recognition sources
+     * AGC-free because recognizers expect natural dynamics, and pumped gain
+     * between words is this model's worst input.
+     */
+    private void attachSpeechEffects(AudioRecord record) {
+        int sessionId = record.getAudioSessionId();
+        StringBuilder report = new StringBuilder("voice-capture-effects");
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(sessionId);
+                if (noiseSuppressor != null) {
+                    noiseSuppressor.setEnabled(true);
+                    report.append(noiseSuppressor.getEnabled() ? " ns=on" : " ns=off");
+                } else {
+                    report.append(" ns=fail");
+                }
+            } else {
+                report.append(" ns=none");
+            }
+        } catch (Throwable failure) {
+            report.append(" ns=error");
+            Log.w("AshkeShadekVoice", "NoiseSuppressor attach failed", failure);
+        }
+        try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                echoCanceler = AcousticEchoCanceler.create(sessionId);
+                if (echoCanceler != null) {
+                    echoCanceler.setEnabled(true);
+                    report.append(echoCanceler.getEnabled() ? " aec=on" : " aec=off");
+                } else {
+                    report.append(" aec=fail");
+                }
+            } else {
+                report.append(" aec=none");
+            }
+        } catch (Throwable failure) {
+            report.append(" aec=error");
+            Log.w("AshkeShadekVoice", "AcousticEchoCanceler attach failed", failure);
+        }
+        Log.i("AshkeShadekVoice", report.toString());
+    }
+
+    private void releaseSpeechEffects() {
+        if (noiseSuppressor != null) {
+            try { noiseSuppressor.release(); } catch (Exception ignored) { }
+            noiseSuppressor = null;
+        }
+        if (echoCanceler != null) {
+            try { echoCanceler.release(); } catch (Exception ignored) { }
+            echoCanceler = null;
+        }
     }
 
     private float[] toModelSamples(short[] pcm, int count, int sourceRate) {
@@ -447,6 +562,7 @@ final class OfflineBengaliVoice {
                         ? "" : finalResult.getText().trim();
                 String phrase = joinTranscript(completedText.toString(), latestText);
                 if (!phrase.isEmpty()) {
+                    Log.i("AshkeShadekVoice", "voice-transcript final=" + phrase);
                     String finalPhrase = phrase;
                     main.post(() -> { if (!releaseRequested) listener.onResult(finalPhrase); });
                 } else {
@@ -458,6 +574,7 @@ final class OfflineBengaliVoice {
             if (!releaseRequested && !sessionCancelled) error(messageFor(failure));
         } finally {
             recorder = null;
+            releaseSpeechEffects();
             if (audio != null) {
                 try { if (audio.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) audio.stop(); }
                 catch (Exception ignored) { }

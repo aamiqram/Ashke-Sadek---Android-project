@@ -24,6 +24,8 @@ public final class VoiceRecognitionService extends Service {
     public static final String ACTION_CANCEL = "org.ashkeshadek.reader.voice.CANCEL";
     public static final String ACTION_RELEASE = "org.ashkeshadek.reader.voice.RELEASE";
     public static final String EXTRA_RECEIVER = "voice_result_receiver";
+    /** Values "speech" (default) or "song"; selects the microphone pipeline. */
+    public static final String EXTRA_MODE = "voice_capture_mode";
 
     public static final int RESULT_STATUS = 1;
     public static final int RESULT_PARTIAL = 2;
@@ -42,6 +44,9 @@ public final class VoiceRecognitionService extends Service {
     /** True while this process holds foreground rank only for a prewarm load. */
     private boolean prewarmForeground;
 
+    /** Speech capture by default; song capture is opt-in via EXTRA_MODE. */
+    private int captureMode = OfflineBengaliVoice.MODE_SPEECH;
+
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         latestStartId = startId;
         if (intent == null) {
@@ -54,6 +59,10 @@ public final class VoiceRecognitionService extends Service {
             //noinspection deprecation
             receiver = intent.getParcelableExtra(EXTRA_RECEIVER);
         }
+
+        ensureCaptureMode(
+                "song".equals(intent.getStringExtra(EXTRA_MODE))
+                        ? OfflineBengaliVoice.MODE_SONG : OfflineBengaliVoice.MODE_SPEECH);
 
         String action = intent.getAction();
         if (ACTION_PREWARM.equals(action)) {
@@ -181,8 +190,31 @@ public final class VoiceRecognitionService extends Service {
     private static final String TITLE_LOADING = "\u098f\u09b6\u0995\u09c7 \u099b\u09be\u09a6\u09c7\u0995 \u2014 \u0995\u09a3\u09cd\u09a0 \u09aa\u09cd\u09b0\u09b8\u09cd\u09a4\u09c1\u09a4 \u09b9\u099a\u09cd\u099b\u09c7";
     private static final String TEXT_LOADING = "\u09ad\u09df\u09c7\u09b8 \u09ae\u09a1\u09c7\u09b2 \u09b2\u09cb\u09a1 \u09b9\u099a\u09cd\u099b\u09c7; \u09ae\u09be\u0987\u0995\u09cd\u09b0\u09cb\u09ab\u09cb\u09a8 \u098f\u0996\u09a8\u09cb \u099a\u09be\u09b2\u09c1 \u09b9\u09df\u09a8\u09bf\u0964";
 
+    /**
+     * The capture mode picks the microphone source and hardware effect set.
+     * The engine caches the loaded model, so a mode change is the one case
+     * where the warm model is given up and reloaded (about eight seconds on
+     * the tested device); ordinary speech sessions reuse the warm engine
+     * untouched. If a prewarm load was mid-flight (loading notification
+     * showing), that load dies here — drop its notification with it or it
+     * would linger forever, since the released worker never reports ready.
+     */
+    private void ensureCaptureMode(int requestedMode) {
+        if (captureMode == requestedMode) return;
+        captureMode = requestedMode;
+        if (prewarmForeground) {
+            prewarmForeground = false;
+            demoteFromForeground();
+        }
+        if (engine != null) {
+            engine.release();
+            waitForEngineToStop(engine);
+            engine = null;
+        }
+    }
+
     private void createEngine() {
-        engine = new OfflineBengaliVoice(this, new OfflineBengaliVoice.Listener() {
+        engine = new OfflineBengaliVoice(this, captureMode, new OfflineBengaliVoice.Listener() {
                 @Override public void onStatus(String message) {
                     sendText(RESULT_STATUS, message);
                     if (message.startsWith("প্রস্তুত")) logMemory("voice-model-loaded");
