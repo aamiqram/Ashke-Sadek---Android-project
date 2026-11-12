@@ -38,6 +38,7 @@ import android.widget.BaseAdapter;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ProgressBar;
@@ -547,7 +548,7 @@ public class MainActivity extends Activity {
         top.setOrientation(LinearLayout.HORIZONTAL);
         top.setBackgroundColor(BG);
         if (showBack) {
-            TextView back = iconButton("‹", 30);
+            FrameLayout back = iconTile(R.drawable.ic_back);
             back.setOnClickListener(v -> onBackPressed());
             top.addView(back, new LinearLayout.LayoutParams(dp(42), dp(46)));
         }
@@ -691,8 +692,8 @@ public class MainActivity extends Activity {
         body.addView(label("দ্রুত প্রবেশ", 18, TEXT, true));
         addSpace(body, 10);
         LinearLayout quick = new LinearLayout(this); quick.setOrientation(LinearLayout.HORIZONTAL);
-        TextView fav = quickTile("♡", "প্রিয় গান", favorites.size());
-        TextView marks = quickTile("▣", "বুকমার্ক", bookmarks.size());
+        LinearLayout fav = quickTile("♡", "প্রিয় গান", favorites.size());
+        LinearLayout marks = quickTile("▣", "বুকমার্ক", bookmarks.size());
         quick.addView(fav, new LinearLayout.LayoutParams(0, dp(86), 1f));
         LinearLayout.LayoutParams markLp = new LinearLayout.LayoutParams(0, dp(86), 1f); markLp.leftMargin = dp(9); quick.addView(marks, markLp);
         fav.setOnClickListener(v -> {
@@ -1741,7 +1742,7 @@ public class MainActivity extends Activity {
         readerHeaderTitle = root.findViewWithTag("screen-title");
         readerHeaderSubtitle = root.findViewWithTag("screen-subtitle");
 
-        TextView headerSearch = iconButton("⌕", 22);
+        FrameLayout headerSearch = iconTile(R.drawable.ic_search);
         headerSearch.setContentDescription("গান খুঁজুন");
         headerSearch.setOnClickListener(v -> showSongSearchDialog());
         LinearLayout.LayoutParams hsLp = new LinearLayout.LayoutParams(dp(42), dp(42));
@@ -1764,8 +1765,11 @@ public class MainActivity extends Activity {
         LinearLayout textSizeControls = new LinearLayout(this);
         textSizeControls.setOrientation(LinearLayout.HORIZONTAL);
         textSizeControls.setGravity(Gravity.CENTER_VERTICAL);
-        textSizeControls.setPadding(dp(18), dp(5), dp(18), dp(5));
-        textSizeControls.setBackgroundColor(SURFACE);
+        textSizeControls.setPadding(dp(14), dp(5), dp(14), dp(5));
+        // Phase 2 glass: the size bar is a frosted pill floating over the
+        // scrolling book, not a flat strip between header and page.
+        textSizeControls.setBackground(Glass.panel(dp(16)));
+        textSizeControls.setElevation(dp(4));
         TextView textSizeLabel = label("লেখার আকার", 12, MUTED, false);
         textSizeControls.addView(textSizeLabel, new LinearLayout.LayoutParams(0, dp(40), 1f));
         TextView smallerText = navButton("ছোট −");
@@ -1779,7 +1783,7 @@ public class MainActivity extends Activity {
         largerText.setContentDescription("গানের লেখা বড় করুন");
         smallerText.setOnClickListener(v -> changeReaderTextSize(currentSong, -1));
         largerText.setOnClickListener(v -> changeReaderTextSize(currentSong, 1));
-        page.addView(textSizeControls, matchWrap());
+        // The size bar joins the floating glass stage further below.
 
         readerList = new ReaderListView(this);
         readerList.setDivider(null);
@@ -1787,7 +1791,9 @@ public class MainActivity extends Activity {
         readerList.setSelector(android.R.color.transparent);
         readerList.setCacheColorHint(BG);
         readerList.setClipToPadding(false);
-        readerList.setPadding(0, dp(6), 0, dp(14));
+        // Top padding leaves room under the floating glass size bar, so the
+        // first paper starts below it while later ones frost through it.
+        readerList.setPadding(0, dp(66), 0, dp(14));
         readerBookSongs = new ArrayList<>(songs);
         Collections.sort(readerBookSongs, (a, b) -> {
             if (a.volume != b.volume) return Integer.compare(a.volume, b.volume);
@@ -1802,7 +1808,17 @@ public class MainActivity extends Activity {
                 updateReaderSongFromScroll(firstVisibleItem);
             }
         });
-        page.addView(readerList, new LinearLayout.LayoutParams(-1, 0, 1f));
+        // Floating glass stage: the book scrolls under the frosted size pill -
+        // the reader's glass moment on every Android version.
+        FrameLayout stage = new FrameLayout(this);
+        stage.addView(readerList, new FrameLayout.LayoutParams(-1, -1));
+        FrameLayout.LayoutParams barParams =
+                new FrameLayout.LayoutParams(-1, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        barParams.leftMargin = dp(10);
+        barParams.rightMargin = dp(10);
+        barParams.topMargin = dp(8);
+        stage.addView(textSizeControls, barParams);
+        page.addView(stage, new LinearLayout.LayoutParams(-1, 0, 1f));
         int initialPosition = readerPositionFor(song);
         int savedOffset = Math.max(0, prefs.getInt("scroll_" + song.id, 0));
         readerList.post(() -> {
@@ -1854,7 +1870,8 @@ public class MainActivity extends Activity {
         LinearLayout paper = new LinearLayout(this);
         paper.setOrientation(LinearLayout.VERTICAL);
         paper.setPadding(dp(18), dp(16), dp(18), dp(22));
-        paper.setBackground(roundStroke(SURFACE, BORDER, 18));
+        // Phase 2 book-feel: warm shaded paper instead of a flat white tile.
+        paper.setBackground(Glass.paper(dp(18)));
         FrameLayout.LayoutParams paperParams = new FrameLayout.LayoutParams(
                 readerPageWidthPx, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         outer.addView(paper, paperParams);
@@ -1865,7 +1882,11 @@ public class MainActivity extends Activity {
         paper.addView(meta, matchWrap());
         addSpace(paper, 10);
 
+        // Book-feel: the song title in the print's semibold serif, matching
+        // the lyric face instead of the UI sans.
         TextView title = label(song.title, 22, TEXT, true);
+        Typeface titleFont = Fonts.serif(true);
+        if (titleFont != null) title.setTypeface(titleFont);
         title.setGravity(Gravity.CENTER);
         title.setLineSpacing(dp(4), 1f);
         paper.addView(title, matchWrap());
@@ -1888,10 +1909,18 @@ public class MainActivity extends Activity {
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.setGravity(Gravity.CENTER);
-        TextView favorite = readerAction(favorites.contains(song.id) ? "♥" : "♡",
-                favorites.contains(song.id) ? GREEN : TEXT, "প্রিয়");
-        TextView bookmark = readerAction(bookmarks.contains(song.id) ? "▣" : "▢",
-                bookmarks.contains(song.id) ? GREEN : TEXT, "বুকমার্ক");
+        ImageView favoriteIcon = new ImageView(this);
+        favoriteIcon.setImageDrawable(Icons.get(this,
+                favorites.contains(song.id) ? R.drawable.ic_heart_filled : R.drawable.ic_heart_outline,
+                favorites.contains(song.id) ? GREEN : TEXT));
+        TextView favoriteLabel = label("প্রিয়", 12, favorites.contains(song.id) ? GREEN : TEXT, true);
+        LinearLayout favorite = iconActionColumn(favoriteIcon, favoriteLabel);
+        ImageView bookmarkIcon = new ImageView(this);
+        bookmarkIcon.setImageDrawable(Icons.get(this,
+                bookmarks.contains(song.id) ? R.drawable.ic_bookmark_filled : R.drawable.ic_bookmark_outline,
+                bookmarks.contains(song.id) ? GREEN : TEXT));
+        TextView bookmarkLabel = label("বুকমার্ক", 12, bookmarks.contains(song.id) ? GREEN : TEXT, true);
+        LinearLayout bookmark = iconActionColumn(bookmarkIcon, bookmarkLabel);
         actions.addView(favorite, new LinearLayout.LayoutParams(0, dp(56), 1f));
         LinearLayout.LayoutParams bookmarkParams = new LinearLayout.LayoutParams(0, dp(56), 1f);
         bookmarkParams.leftMargin = dp(8);
@@ -1899,13 +1928,19 @@ public class MainActivity extends Activity {
         paper.addView(actions);
         favorite.setOnClickListener(v -> {
             toggleSet(favorites, song.id, "favorites");
-            favorite.setText(favorites.contains(song.id) ? "♥\nপ্রিয়" : "♡\nপ্রিয়");
-            favorite.setTextColor(favorites.contains(song.id) ? GREEN : TEXT);
+            boolean favoriteOn = favorites.contains(song.id);
+            favoriteIcon.setImageDrawable(Icons.get(this,
+                    favoriteOn ? R.drawable.ic_heart_filled : R.drawable.ic_heart_outline,
+                    favoriteOn ? GREEN : TEXT));
+            favoriteLabel.setTextColor(favoriteOn ? GREEN : TEXT);
         });
         bookmark.setOnClickListener(v -> {
             toggleSet(bookmarks, song.id, "bookmarks");
-            bookmark.setText(bookmarks.contains(song.id) ? "▣\nবুকমার্ক" : "▢\nবুকমার্ক");
-            bookmark.setTextColor(bookmarks.contains(song.id) ? GREEN : TEXT);
+            boolean bookmarkOn = bookmarks.contains(song.id);
+            bookmarkIcon.setImageDrawable(Icons.get(this,
+                    bookmarkOn ? R.drawable.ic_bookmark_filled : R.drawable.ic_bookmark_outline,
+                    bookmarkOn ? GREEN : TEXT));
+            bookmarkLabel.setTextColor(bookmarkOn ? GREEN : TEXT);
         });
 
         addSpace(paper, 12);
@@ -2117,7 +2152,10 @@ public class MainActivity extends Activity {
         dialog.show();
         int width = Math.min(dp(520), getResources().getDisplayMetrics().widthPixels - dp(32));
         int height = Math.round(getResources().getDisplayMetrics().heightPixels * 0.68f);
-        if (dialog.getWindow() != null) dialog.getWindow().setLayout(width, height);
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(Glass.panel(dp(24), Glass.PANEL));
+            dialog.getWindow().setLayout(width, height);
+        }
         search.requestFocus();
         search.post(() -> {
             android.view.inputmethod.InputMethodManager keyboard =
@@ -2155,9 +2193,9 @@ public class MainActivity extends Activity {
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(24), dp(10), dp(24), dp(18));
-        TextView icon = label("🎙", 30, GREEN, true);
-        icon.setGravity(Gravity.CENTER);
-        content.addView(icon, matchWrap());
+        ImageView icon = new ImageView(this);
+        icon.setImageDrawable(Icons.get(this, R.drawable.ic_mic, GREEN));
+        content.addView(icon, new LinearLayout.LayoutParams(-1, -2));
         voiceStatus = label("বাংলা অফলাইন মডেল চালু হচ্ছে…", 15, TEXT, true);
         voiceStatus.setGravity(Gravity.CENTER);
         voiceStatus.setPadding(0, dp(12), 0, dp(8));
@@ -2183,6 +2221,9 @@ public class MainActivity extends Activity {
             if (!voiceSessionCompleted && voiceServiceStarted) cancelVoiceSession();
         });
         dialog.show();
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(Glass.panel(dp(24), Glass.PANEL));
+        }
         Button action = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
         action.setEnabled(false);
         action.setOnClickListener(v -> {
@@ -2687,8 +2728,9 @@ public class MainActivity extends Activity {
     private ScrollView pageScroll(){ScrollView scroll=new ScrollView(this);scroll.setFillViewport(false);scroll.setClipToPadding(false);page.addView(scroll,new LinearLayout.LayoutParams(-1,-1));LinearLayout body=new LinearLayout(this);body.setOrientation(LinearLayout.VERTICAL);scroll.addView(body);return scroll;}
     private LinearLayout bottomNav(){
         LinearLayout bar=new LinearLayout(this);bar.setBackgroundColor(SURFACE);bar.setGravity(Gravity.CENTER);bar.setOrientation(LinearLayout.HORIZONTAL);bar.setPadding(dp(4),dp(6),dp(4),dp(6));
-        String[] labels={"⌂\nহোম","☷\nসূচী","♡\nপ্রিয়","▣\nবুকমার্ক"};String[] screens={"home","index","favorites","bookmarks"};
-        for(int i=0;i<labels.length;i++){final String screen=screens[i];TextView item=label(labels[i],12,screen.equals(currentScreen)?GREEN:MUTED,screen.equals(currentScreen));item.setGravity(Gravity.CENTER);bar.addView(item,new LinearLayout.LayoutParams(0,-1,1f));item.setOnClickListener(v->{if(screen.equals("home")){homeHasInteracted=true;renderHome();}else if(!catalogReady){Toast.makeText(this,"গানের তালিকা প্রস্তুত হচ্ছে…",Toast.LENGTH_SHORT).show();}else if(screen.equals("index"))renderIndex();else renderSaved(screen);});}
+        String[] labels={"হোম","সূচী","প্রিয়","বুকমার্ক"};String[] screens={"home","index","favorites","bookmarks"};
+        int[] navIcons={R.drawable.ic_home,R.drawable.ic_index,R.drawable.ic_heart_outline,R.drawable.ic_bookmark_outline};
+        for(int i=0;i<labels.length;i++){final String screen=screens[i];boolean active=screen.equals(currentScreen);LinearLayout item=new LinearLayout(this);item.setOrientation(LinearLayout.VERTICAL);item.setGravity(Gravity.CENTER);ImageView itemIcon=new ImageView(this);itemIcon.setImageDrawable(Icons.get(this,navIcons[i],active?GREEN:MUTED));item.addView(itemIcon,new LinearLayout.LayoutParams(dp(22),dp(22)));addSpace(item,3);TextView itemLabel=label(labels[i],11,active?GREEN:MUTED,active);itemLabel.setGravity(Gravity.CENTER);item.addView(itemLabel,new LinearLayout.LayoutParams(-2,-2));item.setClickable(true);item.setFocusable(true);bar.addView(item,new LinearLayout.LayoutParams(0,-1,1f));item.setOnClickListener(v->{if(screen.equals("home")){homeHasInteracted=true;renderHome();}else if(!catalogReady){Toast.makeText(this,"গানের তালিকা প্রস্তুত হচ্ছে…",Toast.LENGTH_SHORT).show();}else if(screen.equals("index"))renderIndex();else renderSaved(screen);});}
         return bar;
     }
 
@@ -2699,7 +2741,16 @@ public class MainActivity extends Activity {
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.addView(search, new LinearLayout.LayoutParams(0, dp(52), 1f));
-        TextView mic = actionButton("🎙", "বলুন");
+        LinearLayout mic = new LinearLayout(this);
+        mic.setOrientation(LinearLayout.VERTICAL);
+        mic.setGravity(Gravity.CENTER);
+        mic.setBackground(roundStroke(SOFT_GREEN, 0xFFD8E5DC, 15));
+        ImageView micIcon = new ImageView(this);
+        micIcon.setImageDrawable(Icons.get(this, R.drawable.ic_mic, GREEN_DARK));
+        mic.addView(micIcon, new LinearLayout.LayoutParams(dp(20), dp(20)));
+        addSpace(mic, 2);
+        TextView micLabel = label("বলুন", 11, GREEN_DARK, true);
+        mic.addView(micLabel, new LinearLayout.LayoutParams(-2, -2));
         LinearLayout.LayoutParams micParams = new LinearLayout.LayoutParams(dp(66), dp(52));
         micParams.leftMargin = dp(8);
         row.addView(mic, micParams);
@@ -2715,14 +2766,46 @@ public class MainActivity extends Activity {
     }
     private EditText searchField(String hint){EditText e=new EditText(this);e.setSingleLine(true);e.setTextSize(15);e.setTextColor(TEXT);e.setHintTextColor(MUTED);e.setHint(hint);e.setPadding(dp(15),0,dp(15),0);e.setBackground(roundStroke(SURFACE,BORDER,15));e.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);return e;}
     private TextView label(String text,int size,int color,boolean bold){TextView t=new TextView(this);t.setText(text);t.setTextSize(size);t.setTextColor(color);Typeface uiFont=Fonts.sans(bold);t.setTypeface(uiFont!=null?uiFont:Typeface.create("sans-serif",bold?Typeface.BOLD:Typeface.NORMAL));t.setIncludeFontPadding(true);return t;}
-    private TextView iconButton(String text,int size){TextView t=label(text,size,GREEN,true);t.setGravity(Gravity.CENTER);t.setBackground(roundFill(SOFT_GREEN,14));return t;}
-    private TextView actionButton(String icon,String text){TextView t=label(icon+"\n"+text,13,GREEN_DARK,true);t.setGravity(Gravity.CENTER);t.setBackground(roundStroke(SOFT_GREEN,0xFFD8E5DC,15));return t;}
-    private TextView readerAction(String icon,int color,String text){TextView t=label(icon+"\n"+text,15,color,true);t.setGravity(Gravity.CENTER);t.setBackground(roundStroke(SURFACE,BORDER,13));return t;}
     private TextView navButton(String text){TextView t=label(text,14,GREEN_DARK,true);t.setGravity(Gravity.CENTER);t.setBackground(roundStroke(SOFT_GREEN,0xFFD8E5DC,14));return t;}
     private TextView badge(String text,int bg,int color){TextView t=label(text,15,color,true);t.setGravity(Gravity.CENTER);t.setBackground(roundFill(bg,14));return t;}
-    private TextView quickTile(String icon,String title,int count){TextView t=label(icon+"   "+title+"\n"+bn(count)+"টি",14,TEXT,true);t.setGravity(Gravity.CENTER);t.setBackground(roundStroke(SURFACE,BORDER,15));return t;}
+    private LinearLayout quickTile(String icon,String title,int count){
+        int iconRes = icon.contains("♡") ? R.drawable.ic_heart_outline : R.drawable.ic_bookmark_outline;
+        LinearLayout tile=new LinearLayout(this);tile.setOrientation(LinearLayout.HORIZONTAL);
+        tile.setGravity(Gravity.CENTER_VERTICAL);
+        tile.setBackground(roundStroke(SURFACE,BORDER,15));
+        tile.setPadding(dp(14),0,dp(14),0);
+        ImageView tileIcon=new ImageView(this);tileIcon.setImageDrawable(Icons.get(this,iconRes,GREEN));
+        tile.addView(tileIcon,new LinearLayout.LayoutParams(dp(20),dp(20)));
+        addSpace(tile,10);
+        TextView t=label(title+"\n"+bn(count)+"টি",14,TEXT,true);
+        tile.addView(t,new LinearLayout.LayoutParams(-2,-2));
+        return tile;}
     private GradientDrawable roundFill(int color,int radius){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(radius));return d;}
     private GradientDrawable roundStroke(int color,int stroke,int radius){GradientDrawable d=roundFill(color,radius);d.setStroke(dp(1),stroke);return d;}
+    /** Soft-green rounded tile with a centered vector icon - header buttons. */
+    private FrameLayout iconTile(int iconRes) {
+        FrameLayout tile = new FrameLayout(this);
+        tile.setBackground(roundFill(SOFT_GREEN, 14));
+        ImageView icon = new ImageView(this);
+        icon.setImageDrawable(Icons.get(this, iconRes, GREEN));
+        tile.addView(icon, new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER));
+        return tile;
+    }
+
+    /** Reader action button: vector icon stacked over its label. */
+    private LinearLayout iconActionColumn(ImageView iconView, TextView textLabel) {
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.setGravity(Gravity.CENTER);
+        column.setBackground(roundStroke(SURFACE, BORDER, 13));
+        column.setPadding(0, dp(6), 0, dp(6));
+        column.setClickable(true);
+        column.setFocusable(true);
+        column.addView(iconView, new LinearLayout.LayoutParams(dp(22), dp(22)));
+        addSpace(column, 4);
+        column.addView(textLabel, new LinearLayout.LayoutParams(-2, -2));
+        return column;
+    }
     private int dp(float value){return (int)(value*getResources().getDisplayMetrics().density+0.5f);}
     private int responsiveWordMeasure(float points, int contentWidthPx, float sourceWidthPt) {
         if (points <= 0f || contentWidthPx <= 0 || sourceWidthPt <= 0f) return 0;

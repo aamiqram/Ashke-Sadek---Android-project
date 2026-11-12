@@ -293,9 +293,50 @@ Landscape rotation (the reader finally uses the rotated width):
   the two-line song title fits one line wide; rotating back restores the
   reading position.
 
-Release: this push consumes run #50 (build); user dispatch = run #51 ->
-v1.1.51-beta / versionCode 1051. Phase 2 continues next: glass design
-tokens + reader page ("glass without blur" pre-API 31 - translucent
-panels, hairline borders, pre-baked blurred backdrop - real RenderEffect
-on 12+, RAM-aware), book-feel kit. Phase 3 (voice tuning on the recorded
-takes) starts when the recordings land.
+Release: this push consumed run #50 (build); user dispatch = run #51 ->
+v1.1.51-beta / versionCode 1051.
+
+Phase 2 - glass, icons, book-feel (verified on the Note 4, local build
+1.1.50-local/1050):
+
+- Glass.java: the token system every frosted surface is built from.
+  "Glass without blur" for pre-API 31 - translucent fill + 1px hairline
+  + elevation shadow; the RenderEffect backdrop-blur tier (API 31+,
+  RAM-gated) joins only when a correct backdrop-capture pipeline exists
+  and never changes what pre-31 devices render.
+  FILL 0xD9FFFFFF (85%) - the floating reader size bar, where lyric lines
+  scroll under the frost live: controls stay crisp, the passing serif
+  title ghosts through as a whisper. 72.5% was tested first and the
+  passing text cluttered the controls.
+  PANEL 0xF2FFFFFF (95%) - dialogs. Platform titles/buttons need a quiet
+  stage; at 85% the screen behind bled through and read as dirt.
+- Floating glass bar: the reader's size controls moved out of the page
+  into a Glass.panel pill floating over the list top (list top padding
+  dp(66), bar margins dp(10)/dp(8), elevation dp(4)) - the book scrolls
+  under the frosted bar on every Android version. Reader page card uses
+  Glass.paper - warm vertical page shade under a reading lamp instead of
+  a flat white tile - and the song title renders in the print's semibold
+  serif (Fonts.serif) matching the lyric face.
+- Icons.java + 9 Material-style vector drawables (ic_back, ic_search,
+  ic_mic, ic_home, ic_index, ic_heart_outline/filled,
+  ic_bookmark_outline/filled): the old text-glyph icons (⌂ ☷ ♡ ▣ 🎙 ⌕ ‹)
+  rendered differently per platform - MIUI forced the mic into a colour
+  emoji - and no font agreed on their weight. Vectors take the palette
+  as a tint, keep one hairline weight from Android 5 up, scale crisply,
+  and add zero runtime deps. Wired: mount back, reader search, bottom
+  nav icon+label stacks, quick tiles, reader favourite/bookmark toggles
+  (outline <-> filled swap on tap), mic buttons in the search row and
+  the voice dialog. Dead glyph helpers deleted.
+- Dialog glass: voice + song-search dialogs sit on Glass.PANEL with 24dp
+  radius (window background). On-device verified: no edge-hugging, title
+  and buttons crisp, backdrop a whisper.
+- On-device proof (Note 4): bottom nav and reader icons crisp; the
+  floating bar frosts the scrolling lyrics while keeping every control
+  legible; paper + serif title read as a printed page; both dialogs
+  verified at the dense frost.
+
+Next: user dispatch -> v1.1.52-beta / versionCode 1052 (or #51 first for
+voice+landscape as v1.1.51-beta). Phase 3: SPEAK/SING recordings ->
+calibrate_voice_fuzzy.py -> tune fuzzy/hotword constants, song-mode
+band-pass + UI. Live voice-transcript capture happens with the user
+speaking into the open dialog (telemetry already logging).
