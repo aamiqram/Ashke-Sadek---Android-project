@@ -340,3 +340,55 @@ voice+landscape as v1.1.51-beta). Phase 3: SPEAK/SING recordings ->
 calibrate_voice_fuzzy.py -> tune fuzzy/hotword constants, song-mode
 band-pass + UI. Live voice-transcript capture happens with the user
 speaking into the open dialog (telemetry already logging).
+
+
+Phase 2b - original-book bold emphasis restored + frosty-water-bottle
+glass (verified on the Note 4, local build 1.1.50-local/1050):
+
+- Root cause of the missing bold initials: loadEmphasis() opened only
+  lyrics_emphasis.json.gz, but packaged builds ship the decompressed
+  copy (Gradle/AGP unzips .gz assets - the exact rule openCatalog()
+  documents for songs.json). The sidecar threw FileNotFoundException,
+  the whole load was swallowed by the catch, and every block rendered
+  without its Word-extracted bold ranges. Fix: openEmphasis() with the
+  same gzip-then-plain fallback the catalogue uses. The sidecar data
+  itself was verified byte-identical to what CI packages (sha
+  38785f7d52543ba2).
+- The emphasis data mirrors the original book exactly, verified deeply
+  against both sources: the Word runs (Eshq e Sadeq 1st volume.docx,
+  song 1 paragraphs 2-17) bold exactly the acrostic initials spelling
+  the author's name - a(2) ha(4) ma(6) da(8) u(10) la(12) la(14) ha(16)
+  - while the refrein lines (ending amin/oi) stay regular so the hidden
+  name pops; and the 300 dpi print zoom of PDF page 30 (Murshidi-12)
+  shows every line's first cluster bold for a non-acrostic song -
+  which song 1-12's Word data also records line by line. 5,909 of
+  6,246 sidecar rows carry [0,1]/[0,2] first-cluster spans; the 333
+  empty rows are the acrostic songs' non-name lines, genuinely not
+  bold in the Word source.
+- Bold emphasis now also rides slightly larger than the body text
+  (RelativeSizeSpan 1.125x over the same range as SerifEmphasisSpan)
+  - the print shop's bold cut reads a hair bigger; at the default
+  16sp that is the reader's own +2 step, scaled with the chosen size.
+  On-device: Gaan 1 acrostic initials a ha ma da clearly heavier and
+  larger while Bismillah/Yakana/Ihadinach stay regular; Gaan 11's la
+  and hr likewise. Line spacing stays natural.
+- Glass frost premium upgrade: Glass.panel() now returns a Frost
+  drawable - five coats on one rounded path instead of a flat fill:
+  (1) a vertically lit gradient band around the requested frost
+  density (bright crown, quiet waist, faint bottom lift; deltas scale
+  with the density so PANEL stays dense and FILL keeps ghost-through),
+  (2) a crystalline grain - one deterministic 128px speck tile
+  (xorshift-seeded, seam-free) with frost-shade dust in icy blue-grey
+  plus white glints, BitmapShader-tiled, (3) a diagonal gloss - a hot
+  specular line near the crown, a wide soft band through the middle
+  and a faint lower reflection, (4) a bright top rim fading down the
+  sides, (5) the quiet hairline. Every layer is a filled or stroked
+  Path with a shader paint - no clipPath, so hardware acceleration
+  renders it identically back to Android 5. ICE_RGB 0xF5FBFF gives
+  the panel a real cool cast against the cream page; paper() is
+  unchanged. On-device: the floating size bar reads as freezer-cold
+  frosted glass with the lyric title still ghosting through, and both
+  dialogs keep their dense quiet ice stage.
+
+Release: this push consumes run #52 (build); user dispatch = run #53
+-> v1.1.53-beta / versionCode 1053.
