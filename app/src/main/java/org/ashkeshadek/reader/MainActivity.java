@@ -195,6 +195,7 @@ public class MainActivity extends Activity {
         launchStartedUptimeMs = SystemClock.uptimeMillis();
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         installCrashDiagnosticHandler();
+        Fonts.init(this);
         favorites = new LinkedHashSet<>(prefs.getStringSet("favorites", Collections.emptySet()));
         bookmarks = new LinkedHashSet<>(prefs.getStringSet("bookmarks", Collections.emptySet()));
         lastSongId = prefs.getString("last_song", "");
@@ -336,6 +337,11 @@ public class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         AppUpdater.resumePendingInstall(this);
+        // The voice process releases its model after the idle window and
+        // memory keepers can reclaim it outright. Re-arm the prewarm every
+        // time the app comes to the front, so the next mic tap usually finds
+        // a warm model instead of a fresh multi-second load.
+        scheduleOfflineVoicePrewarm();
     }
 
     /**
@@ -1971,9 +1977,18 @@ public class MainActivity extends Activity {
 
     private void addReaderLyrics(LinearLayout parent, Song song, int textMeasure, int lyricSizeSp) {
         final float wordTextWidthPt = 671.8f;
+        Typeface lyricFont = Fonts.serif(false);
+        // Word-faithful sizing: every song renders at the reader's chosen size,
+        // the same size for the whole book, exactly like the formatted Word
+        // source and its PDF. A line too long for the phone column wraps to the
+        // next line at a word boundary — what Word itself did — instead of
+        // shrinking. Earlier builds shrank overflowing lines, first per line
+        // and then per song, which made some songs render smaller than their
+        // neighbours; the reader saw books of mixed type sizes.
         for (LyricBlock block : song.lyricBlocks) {
             String blockText = song.lyrics.substring(block.startOffset, block.endOffset);
             TextView lyricLine = label(blockText, lyricSizeSp, TEXT, false);
+            if (lyricFont != null) lyricLine.setTypeface(lyricFont);
             int gravity = block.alignment == 1 ? Gravity.CENTER_HORIZONTAL
                     : block.alignment == 2 ? Gravity.RIGHT : Gravity.LEFT;
             lyricLine.setGravity(gravity);
@@ -1994,7 +2009,7 @@ public class MainActivity extends Activity {
                 if (block.boldSpans != null) for (int[] span : block.boldSpans) {
                     int start = Math.max(0, Math.min(span[0], styled.length()));
                     int end = Math.max(start, Math.min(span[1], styled.length()));
-                    if (end > start) styled.setSpan(new StyleSpan(Typeface.BOLD), start, end,
+                    if (end > start) styled.setSpan(new SerifEmphasisSpan(), start, end,
                             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 }
                 if (leftIndent > 0 || firstIndent > 0) {
@@ -2006,30 +2021,6 @@ public class MainActivity extends Activity {
             lyricLine.setPadding(0, 0,
                     responsiveWordMeasure(block.rightIndentPt, textMeasure, wordTextWidthPt), 0);
             lyricLine.setTextIsSelectable(true);
-            // Keep every printed line on one screen line whenever possible: when an
-            // original line slightly overflows the column, shrink the font just for
-            // that line instead of wrapping mid-sentence — the printed book never
-            // breaks these lines, so wrapping here looks wrong to the reader.
-            if (!blockText.contains("\n")) {
-                int rightIndent = responsiveWordMeasure(
-                        block.rightIndentPt, textMeasure, wordTextWidthPt);
-                int targetWidth = textMeasure - leftIndent - firstIndent - rightIndent;
-                if (targetWidth > 0) {
-                    android.text.TextPaint plainPaint =
-                            new android.text.TextPaint(lyricLine.getPaint());
-                    android.text.TextPaint boldPaint = new android.text.TextPaint(plainPaint);
-                    boldPaint.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
-                    float measuredWidth = Math.max(plainPaint.measureText(blockText),
-                            boldPaint.measureText(blockText));
-                    if (measuredWidth > targetWidth) {
-                        float fitScale = Math.max(0.72f, targetWidth / measuredWidth);
-                        if (fitScale < 0.985f) {
-                            lyricLine.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP,
-                                    lyricSizeSp * fitScale);
-                        }
-                    }
-                }
-            }
             LinearLayout.LayoutParams lyricParams = matchWrap();
             lyricParams.topMargin = responsiveWordMeasure(
                     block.spaceBeforePt, textMeasure, wordTextWidthPt);
@@ -2367,6 +2358,10 @@ public class MainActivity extends Activity {
             old.dismiss();
         }
         voiceListeningStarted = false;
+        // Keep the model warm right after a session: the process usually
+        // still holds it (the prewarm action no-ops then), and if it was
+        // lost this reloads it in the background while the user reads.
+        scheduleOfflineVoicePrewarm();
     }
 
     private boolean hasRoomForVoicePrewarm() {
@@ -2385,8 +2380,26 @@ public class MainActivity extends Activity {
             voicePrewarmTask = null;
             if (isFinishing() || isDestroyed() || voiceServiceStarted) return;
             try {
-                startService(new Intent(this, VoiceRecognitionService.class)
-                        .setAction(VoiceRecognitionService.ACTION_PREWARM));
+                Intent prewarmIntent = new Intent(this, VoiceRecognitionService.class)
+                        .setAction(VoiceRecognitionService.ACTION_PREWARM);
+                startService(prewarmIntent);
+                // Keep a binding while the app is visible: a bound process
+                // shares the app's importance, so the warm model survives
+                // memory pressure while the user browses and reads. The
+                // binding itself holds no engine; the service still releases
+                // the model after its idle window.
+                if (!prewarmBound) {
+                    prewarmConnection = new ServiceConnection() {
+                        @Override public void onServiceConnected(
+                                ComponentName name, IBinder binder) {
+                        }
+                        @Override public void onServiceDisconnected(ComponentName name) {
+                            prewarmBound = false;
+                        }
+                    };
+                    prewarmBound = bindService(prewarmIntent, prewarmConnection,
+                            Context.BIND_AUTO_CREATE);
+                }
                 voiceModelServiceActive = true;
             } catch (Exception error) {
                 Log.w("AshkeShadekVoice", "Could not prewarm bundled voice model", error);
@@ -2400,8 +2413,19 @@ public class MainActivity extends Activity {
         voicePrewarmTask = null;
     }
 
+    /** Binding that keeps the prewarmed voice process attached to this app. */
+    private ServiceConnection prewarmConnection;
+    private boolean prewarmBound;
+
     private void stopOfflineVoiceService() {
         cancelVoicePrewarmSchedule();
+        if (prewarmBound) {
+            try {
+                unbindService(prewarmConnection);
+            } catch (Exception ignored) {
+            }
+            prewarmBound = false;
+        }
         if (voiceServiceStarted) cancelVoiceSession();
         try { stopService(new Intent(this, VoiceRecognitionService.class)); }
         catch (Exception error) {
@@ -2677,7 +2701,7 @@ public class MainActivity extends Activity {
         return row;
     }
     private EditText searchField(String hint){EditText e=new EditText(this);e.setSingleLine(true);e.setTextSize(15);e.setTextColor(TEXT);e.setHintTextColor(MUTED);e.setHint(hint);e.setPadding(dp(15),0,dp(15),0);e.setBackground(roundStroke(SURFACE,BORDER,15));e.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);return e;}
-    private TextView label(String text,int size,int color,boolean bold){TextView t=new TextView(this);t.setText(text);t.setTextSize(size);t.setTextColor(color);t.setTypeface(Typeface.create("sans-serif",bold?Typeface.BOLD:Typeface.NORMAL));t.setIncludeFontPadding(true);return t;}
+    private TextView label(String text,int size,int color,boolean bold){TextView t=new TextView(this);t.setText(text);t.setTextSize(size);t.setTextColor(color);Typeface uiFont=Fonts.sans(bold);t.setTypeface(uiFont!=null?uiFont:Typeface.create("sans-serif",bold?Typeface.BOLD:Typeface.NORMAL));t.setIncludeFontPadding(true);return t;}
     private TextView iconButton(String text,int size){TextView t=label(text,size,GREEN,true);t.setGravity(Gravity.CENTER);t.setBackground(roundFill(SOFT_GREEN,14));return t;}
     private TextView actionButton(String icon,String text){TextView t=label(icon+"\n"+text,13,GREEN_DARK,true);t.setGravity(Gravity.CENTER);t.setBackground(roundStroke(SOFT_GREEN,0xFFD8E5DC,15));return t;}
     private TextView readerAction(String icon,int color,String text){TextView t=label(icon+"\n"+text,15,color,true);t.setGravity(Gravity.CENTER);t.setBackground(roundStroke(SURFACE,BORDER,13));return t;}

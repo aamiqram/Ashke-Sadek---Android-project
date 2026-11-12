@@ -39,6 +39,9 @@ public final class VoiceRecognitionService extends Service {
     private Runnable idleShutdown;
     private boolean stopAfterFinish;
 
+    /** True while this process holds foreground rank only for a prewarm load. */
+    private boolean prewarmForeground;
+
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         latestStartId = startId;
         if (intent == null) {
@@ -56,9 +59,16 @@ public final class VoiceRecognitionService extends Service {
         if (ACTION_PREWARM.equals(action)) {
             cancelIdleShutdown();
             if (engine == null) createEngine();
-            if (!engine.isRunning()) engine.start();
+            if (!engine.isRunning()) {
+                // A prewarm load runs unattended: hold foreground rank so
+                // memory keepers cannot kill it mid-load on low-memory phones.
+                prewarmForeground = true;
+                promoteToForeground(true);
+                engine.start();
+            }
         } else if (ACTION_START.equals(action)) {
             cancelIdleShutdown();
+            prewarmForeground = false;
             promoteToForeground();
             if (engine == null) {
                 createEngine();
@@ -111,8 +121,12 @@ public final class VoiceRecognitionService extends Service {
      * foreground service is the platform-sanctioned protection against that.
      */
     private void promoteToForeground() {
+        promoteToForeground(false);
+    }
+
+    private void promoteToForeground(boolean loading) {
         try {
-            android.app.Notification notification = buildForegroundNotification();
+            android.app.Notification notification = buildForegroundNotification(loading);
             if (Build.VERSION.SDK_INT >= 29) {
                 startForeground(FOREGROUND_NOTIFICATION_ID, notification,
                         android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
@@ -133,6 +147,12 @@ public final class VoiceRecognitionService extends Service {
     }
 
     private android.app.Notification buildForegroundNotification() {
+        return buildForegroundNotification(false);
+    }
+
+    private android.app.Notification buildForegroundNotification(boolean loading) {
+        String title = loading ? TITLE_LOADING : TITLE_LISTENING;
+        String text = loading ? TEXT_LOADING : TEXT_LISTENING;
         if (Build.VERSION.SDK_INT >= 26) {
             android.app.NotificationManager manager =
                     (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
@@ -150,17 +170,28 @@ public final class VoiceRecognitionService extends Service {
                 : new android.app.Notification.Builder(this);
         return builder
                 .setSmallIcon(R.drawable.ic_book)
-                .setContentTitle("এশকে ছাদেক — কণ্ঠ শুনছে")
-                .setContentText("গানের একটি লাইন বলুন—সম্ভাব্য গান সামনে আসবে।")
+                .setContentTitle(title)
+                .setContentText(text)
                 .setOngoing(true)
                 .build();
     }
+
+    private static final String TITLE_LISTENING = "\u098f\u09b6\u0995\u09c7 \u099b\u09be\u09a6\u09c7\u0995 \u2014 \u0995\u09a3\u09cd\u09a0 \u09b6\u09c1\u09a8\u099b\u09c7";
+    private static final String TEXT_LISTENING = "\u0997\u09be\u09a8\u09c7\u09b0 \u098f\u0995\u099f\u09bf \u09b2\u09be\u0987\u09a8 \u09ac\u09b2\u09c1\u09a8\u2014\u09b8\u09ae\u09cd\u09ad\u09be\u09ac\u09cd\u09af \u0997\u09be\u09a8 \u09b8\u09be\u09ae\u09a8\u09c7 \u0986\u09b8\u09ac\u09c7\u0964";
+    private static final String TITLE_LOADING = "\u098f\u09b6\u0995\u09c7 \u099b\u09be\u09a6\u09c7\u0995 \u2014 \u0995\u09a3\u09cd\u09a0 \u09aa\u09cd\u09b0\u09b8\u09cd\u09a4\u09c1\u09a4 \u09b9\u099a\u09cd\u099b\u09c7";
+    private static final String TEXT_LOADING = "\u09ad\u09df\u09c7\u09b8 \u09ae\u09a1\u09c7\u09b2 \u09b2\u09cb\u09a1 \u09b9\u099a\u09cd\u099b\u09c7; \u09ae\u09be\u0987\u0995\u09cd\u09b0\u09cb\u09ab\u09cb\u09a8 \u098f\u0996\u09a8\u09cb \u099a\u09be\u09b2\u09c1 \u09b9\u09df\u09a8\u09bf\u0964";
 
     private void createEngine() {
         engine = new OfflineBengaliVoice(this, new OfflineBengaliVoice.Listener() {
                 @Override public void onStatus(String message) {
                     sendText(RESULT_STATUS, message);
                     if (message.startsWith("প্রস্তুত")) logMemory("voice-model-loaded");
+                    if (prewarmForeground) {
+                        // Load finished and no session asked for the mic:
+                        // drop the loading notification, keep the warm model.
+                        prewarmForeground = false;
+                        demoteFromForeground();
+                    }
                     else if (message.startsWith("শুনছি")) logMemory("voice-capture-active");
                     if (message.startsWith("প্রস্তুত") && engine != null
                             && engine.isWaitingForBegin()) scheduleIdleShutdown();
@@ -217,7 +248,31 @@ public final class VoiceRecognitionService extends Service {
             current.release();
             waitForEngineToStop(current);
         };
-        handler.postDelayed(idleShutdown, 120_000L);
+        handler.postDelayed(idleShutdown, idleWindowMs());
+    }
+
+    /**
+     * How long a loaded-but-idle engine stays warm. Holding the loaded model
+     * is the whole point of prewarming — the next mic tap opens instantly —
+     * but the memory must eventually go back. Roomy devices keep it warm for
+     * ten minutes; tight devices keep the original two minutes.
+     */
+    private long idleWindowMs() {
+        try {
+            android.app.ActivityManager manager =
+                    (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+            if (manager != null) {
+                android.app.ActivityManager.MemoryInfo memory =
+                        new android.app.ActivityManager.MemoryInfo();
+                manager.getMemoryInfo(memory);
+                if (memory.totalMem >= 2L * 1024L * 1024L * 1024L
+                        && memory.availMem >= 256L * 1024L * 1024L) {
+                    return 600_000L;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return 120_000L;
     }
 
     private void waitForEngineToStop(OfflineBengaliVoice current) {

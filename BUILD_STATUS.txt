@@ -164,3 +164,67 @@ Release: next dispatch -> v1.1.46-beta, versionCode 1046 (run-number math
 in .github/workflows/release-apk.yml. tests/validate_catalog.py extended to
 assert FGS permissions/service type, cert bundle size, and the hotword fix
 (relative asset path + modelingUnit/bpeVocab) - all green.
+
+---
+
+Nov 12, 2026 working tree (awaiting push) - bundled Bengali fonts,
+Word-faithful uniform type, protected voice prewarm:
+
+Fonts (assets/fonts/, 928 KB total, OFL license bundled):
+
+- Noto Serif Bengali Regular + SemiBold for lyrics, Noto Sans Bengali
+  Regular + Medium for UI. Hinted STATIC TTFs on purpose: variable-weight
+  selection needs API 26+, and Android 5-7 must render identically.
+  Serif Sans zips SHA-256 verified before extraction (Sans release
+  2aca24bf...83b1). Every load falls back to the system typeface, so a
+  broken font bundle can never blank the app.
+- Fonts.java loads them; label() uses the bundled sans (real medium weight
+  replaces faux bold for Bengali labels).
+- SerifEmphasisSpan applies the serif's TRUE semibold for Word-source bold
+  emphasis; the old StyleSpan(BOLD) forced the system to fake bold over the
+  Bengali fallback, smearing emphasized words.
+- tests/validate_fonts.py (dependency-free cmap parser, format 4+12) proves
+  all four fonts cover every Bengali codepoint used by the catalogue and
+  Java sources: 77 codepoints, 4 fonts, all green; validate_catalog.py
+  still green.
+
+Uniform type - the user's Word/PDF promise ("all songs same size"):
+
+- History: per-line shrink (v1.1.46) fluctuated lines inside a song; this
+  round first made the scale per-song uniform, and the user then reported
+  the remaining cross-song variant: big-line songs rendered smaller than
+  neighbours, unlike the Word/PDF where one size fits every song.
+- Final policy (user chose it): ONE type size for the whole book at the
+  reader's chosen size; a line too long for the column wraps at a word
+  boundary exactly as Word did. No shrink pass remains - the measurement
+  probe, songScale and appliedScale are gone. Wrap continuation honours
+  LeadingMarginSpan indents; BREAK_STRATEGY_SIMPLE + no hyphenation keeps
+  greedy Word-like breaking; center/right/justify alignments unchanged.
+- On-device proof (Note 4, 16 sp): song 4 (previously fluctuating lines
+  3-5) renders 23 uniform lines with no wrap needed; song 11 (flagged)
+  renders at full 16 with long lines wrapping Word-style; song 14 uniform.
+
+Protected prewarm (warm model survives browsing):
+
+- Three warm-loss mechanisms closed: (1) idle teardown now memory-aware -
+  600 s when totalMem >= 2 GiB && availMem >= 256 MB, else the old 120 s;
+  (2) the prewarm load now holds foreground rank with an honest loading
+  notification ("কণ্ঠ প্রস্তুত হচ্ছে...") and demotes (stopForeground)
+  the moment the model reports ready, so no listening notice lingers;
+  (3) MainActivity binds the prewarmed process (BIND_AUTO_CREATE) so it
+  shares the app's importance while the user browses.
+- Re-prewarm re-armed on every onResume and after every session cancel;
+  the prewarm action no-ops when the model is already warm.
+- On-device proof (Note 4, Android 7, 2.91 GiB): app open -> spawn at
+  +2.5 s after search index, model loaded in 7.6-7.9 s (pssKb 75.9-76.9 MB,
+  nativeHeap ~63 MB), loading notification posted then removed exactly at
+  voice-model-loaded, service record shows createdFromFg=true with the
+  BIND_AUTO_CREATE connection, and the process was still alive with the
+  warm model well past the old 120 s window (600 s window confirmed).
+  Reinstall + relaunch re-prewarmed cleanly (23:03 spawn -> loaded 7.9 s).
+
+Local :app:assembleDebug BUILD SUCCESSFUL (1.1.49-local, versionCode 1049,
+release-key-signed so it installs straight over v1.1.46-beta). Next: push
+consumes run #48; user dispatch = run #49 -> v1.1.49-beta / 1049. Phase 2
+(glass design system + book feel) and Phase 3 (voice tuning on recorded
+audio) follow after the release.
