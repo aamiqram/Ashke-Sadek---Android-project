@@ -431,3 +431,37 @@ against the live failure on the Note 4, local build 1.1.50-local/1050):
 
 Release: this push consumes run #54 (build); user dispatch = run #55 ->
 v1.1.55-beta / versionCode 1055.
+
+
+Phase 2d - new-update shade notification (verified on the Note 4, local
+build 1.1.54-local/1054):
+
+- Discoverability gap: the auto-check ran once per 24 h and went fully
+  silent once the dialog was dismissed with পরে, so a released update
+  could go unnoticed. Every auto-detected update now also posts a
+  system-shade notification - এশকে ছাদেক - নতুন সংস্করণ ... ডাউনলোড ও
+  ইনস্টল করতে ট্যাপ করুন - re-posted in place on each fresh detection
+  so the shade always carries the one current reminder. The in-app
+  dialog still honours the dismissal; the shade reminder does not.
+- Tapping the notification opens MainActivity carrying
+  EXTRA_OPEN_UPDATE (CLEAR_TOP|SINGLE_TOP routes into onNewIntent when
+  the app is already open; a cold start handles it in onCreate) and
+  runs a user-initiated check that always shows the download-and-install
+  dialog - also for a previously dismissed release.
+- Channel ashke_app_updates (importance default) on API 26+; the legacy
+  builder below. Posting is skipped when the system has notifications
+  switched off (API 33+ runtime toggle; POST_NOTIFICATIONS is declared
+  so a later request can enable it) - the dialog stays the primary
+  notice there. Manual checks never post: the user is already in the
+  dialog.
+- On-device wiring check (Note 4, local 1054): am start with the extra
+  opens the app and runs the fresh check end to end - it correctly
+  reports "already on the latest version" because update.json's newest
+  release (1053) is lower than the installed 1054. The notification
+  itself fires on the first post-release auto-check, once a release
+  newer than 1054 exists; the installer dialog that follows is the
+  MIUI-safe path from Phase 2c.
+
+Release: this push consumes run #55 (build); dispatching it runs #56 ->
+v1.1.56-beta / versionCode 1056 - carrying the MIUI-safe installer and
+the update notification together.

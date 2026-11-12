@@ -4,6 +4,10 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.AlertDialog;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.SharedPreferences;
 import android.content.Intent;
 import android.content.Context;
@@ -95,6 +99,12 @@ public class MainActivity extends Activity {
     private static final int MIC_PERMISSION = 410;
     private static final int REQUEST_EXPORT_USER_DATA = 512;
     private static final int REQUEST_IMPORT_USER_DATA = 513;
+    /** Shade reminder posted whenever an auto-check detects a newer release. */
+    private static final String UPDATE_NOTIFICATION_CHANNEL = "ashke_app_updates";
+    private static final int UPDATE_NOTIFICATION_ID = 4153;
+    private static final int REQUEST_OPEN_UPDATE = 515;
+    /** Carried by the update notification's tap intent. */
+    private static final String EXTRA_OPEN_UPDATE = "org.ashkeshadek.reader.OPEN_UPDATE";
     private static final String USER_DATA_BACKUP_FORMAT = "ashke-shadek-user-data";
     private static final String FEEDBACK_OUTBOX_KEY = "feedback_outbox_v1";
     private static final String PERFORMANCE_EVENTS_KEY = "performance_events_v1";
@@ -219,7 +229,13 @@ public class MainActivity extends Activity {
         renderHome();
         loadCatalogInBackground();
         long lastUpdateCheck = prefs.getLong("last_update_check_ms", 0L);
-        if (System.currentTimeMillis() - lastUpdateCheck >= 24L * 60L * 60L * 1000L) {
+        if (getIntent() != null && getIntent().getBooleanExtra(EXTRA_OPEN_UPDATE, false)) {
+            // Tapped the update notification: a fresh check runs and the
+            // download-and-install dialog opens even for a once-dismissed
+            // release.
+            checkForAppUpdates(true);
+        } else if (System.currentTimeMillis() - lastUpdateCheck
+                >= 24L * 60L * 60L * 1000L) {
             checkForAppUpdates(false);
         }
     }
@@ -1186,6 +1202,14 @@ public class MainActivity extends Activity {
         lastSongId = importedLast;
     }
 
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        // The app was already open when its update notification was tapped.
+        if (intent != null && intent.getBooleanExtra(EXTRA_OPEN_UPDATE, false)) {
+            checkForAppUpdates(true);
+        }
+    }
+
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         // The Android 5-7 installer confirm returns no data URI.
@@ -1221,7 +1245,13 @@ public class MainActivity extends Activity {
             @Override public void onUpdateAvailable(AppUpdater.UpdateInfo update) {
                 prefs.edit().putLong("last_update_check_ms", System.currentTimeMillis()).apply();
                 long dismissed = prefs.getLong("dismissed_update_version", 0L);
-                if (!userInitiated && dismissed == update.versionCode) return;
+                if (!userInitiated) {
+                    // Every fresh detection posts a shade reminder so the
+                    // update stays visible even after the dialog was once
+                    // put off; the dialog itself still honours the dismissal.
+                    postUpdateNotification(update);
+                    if (dismissed == update.versionCode) return;
+                }
                 showUpdateAvailable(update);
             }
 
@@ -1238,6 +1268,49 @@ public class MainActivity extends Activity {
                 if (userInitiated) showUpdateCheckUnavailable(message);
             }
         });
+    }
+
+    /**
+     * Shade reminder for a freshly detected update: tapping it re-opens the
+     * app and runs a fresh check that always offers download-and-install.
+     * Silent when the system has notifications switched off (API 33+ runtime
+     * toggle); the in-app dialog remains the primary notice there.
+     */
+    private void postUpdateNotification(AppUpdater.UpdateInfo update) {
+        NotificationManager manager =
+                (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        if (Build.VERSION.SDK_INT >= 24 && !manager.areNotificationsEnabled()) return;
+
+        Intent open = new Intent(this, MainActivity.class)
+                .putExtra(EXTRA_OPEN_UPDATE, true)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent content = PendingIntent.getActivity(this, REQUEST_OPEN_UPDATE,
+                open, PendingIntent.FLAG_UPDATE_CURRENT);
+
+        String title = "এশকে ছাদেক — নতুন সংস্করণ";
+        String text = "সংস্করণ " + update.versionName
+                + " পাওয়া গেছে। ডাউনলোড ও ইনস্টল করতে ট্যাপ করুন।";
+        Notification notification;
+        if (Build.VERSION.SDK_INT >= 26) {
+            NotificationChannel channel = new NotificationChannel(
+                    UPDATE_NOTIFICATION_CHANNEL, "অ্যাপ আপডেট",
+                    NotificationManager.IMPORTANCE_DEFAULT);
+            channel.setDescription("নতুন সংস্করণের ঘোষণা");
+            manager.createNotificationChannel(channel);
+            notification = new Notification.Builder(this, UPDATE_NOTIFICATION_CHANNEL)
+                    .setSmallIcon(R.drawable.ic_book).setColor(GREEN_DARK)
+                    .setContentTitle(title).setContentText(text)
+                    .setContentIntent(content).setAutoCancel(true).build();
+        } else {
+            //noinspection deprecation
+            notification = new Notification.Builder(this)
+                    .setSmallIcon(R.drawable.ic_book).setColor(GREEN_DARK)
+                    .setContentTitle(title).setContentText(text)
+                    .setContentIntent(content).setAutoCancel(true).build();
+        }
+        manager.notify(UPDATE_NOTIFICATION_ID, notification);
     }
 
     private void showUpdateCheckUnavailable(String reason) {
