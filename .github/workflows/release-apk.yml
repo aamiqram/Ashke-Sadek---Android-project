@@ -86,12 +86,14 @@ jobs:
             --arg apkUrl "$APK_URL" \
             --arg sha256 "$APK_SHA" \
             --arg certificateSha256 "$CERT_SHA" \
-            --arg releaseNotes "আপডেট পরীক্ষা এখন বেশি নির্ভরযোগ্য — আগে CDN মিরর, পরে GitHub API, ব্যর্থ হলে আসল কারণ দেখায়। পড়ার পাতা এখন বইয়ের মতো চওড়া; মুদ্রিত লাইন প্রয়োজনে সামান্য ছোট করে এক লাইনে ফিট করা হয়, ফলে অকারণ লাইনভাঙা প্রায় শেষ।" \
+            --arg releaseNotes "ভয়েস সার্ভিস এখন মডেল লোডের সময় ফোরগ্রাউন্ড র্যাঙ্কে থাকে—কম মেমরির ফোনেও লোডের মধ্যে বন্ধ হয় না, বন্ধ হলে একবার নীরব পুনঃচেষ্টা হয়। পুরোনো অ্যান্ড্রোয়েডের জন্য আধুনিক রুট-সার্টিফিকেট বান্ডেল করা হয়েছে—আপডেট পরীক্ষায় SSL ত্রুটি দূর। আপডেট পরীক্ষা এখন বেশি নির্ভরযোগ্য — আগে CDN মিরর, পরে GitHub API, ব্যর্থ হলে আসল কারণ দেখায়। পড়ার পাতা এখন বইয়ের মতো চওড়া; মুদ্রিত লাইন প্রয়োজনে সামান্য ছোট করে এক লাইনে ফিট করা হয়, ফলে অকারণ লাইনভাঙা প্রায় শেষ।" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,certificateSha256:$certificateSha256,releaseNotes:$releaseNotes}' \
             > update.json
           cat > release-notes.md <<EOF
           ## এশকে ছাদেক Android — ${VERSION_NAME}
 
+          - Voice search now runs the isolated recognizer as a foreground service (with a small ongoing "listening" notification) so memory keepers cannot reclaim it during model load on low-RAM phones; a process death mid-session gets one silent automatic retry before the user is asked to try again.
+          - Update checks bundle the modern root certificates (Let's Encrypt, GlobalSign, DigiCert, Google Trust Services, USERTrust) alongside the system store, so old Android 5-7 trust stores can verify GitHub's current HTTPS chains — this fixes the "trust anchor not found" SSL failure seen on devices like the Redmi Note 4.
           - Update checks now try a CDN-mirrored manifest first (no GitHub API quota), then the API with one retry; a failed check explains the actual cause (DNS, SSL, timeout, HTTP 403 rate limit).
           - The reading column is wider (432dp) and each printed line gently fits the column instead of wrapping mid-sentence; font-size controls still work.
           - The offline voice decoder now carries the songbook's own vocabulary: 3,952 hotword phrases (titles, first-line windows, rare words) generated from the catalogue steer beam search, so sung titles and familiar lines resolve far more often.

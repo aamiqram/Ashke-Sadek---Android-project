@@ -109,3 +109,58 @@ auto-derives from the run number (versionCode = 1000 + run_number), so ask the
 run page for the exact number; it is past 1.1.41 because push builds consume
 run numbers too. Then device QA of voice search while watching the decode-load
 logs.
+
+Nov 12, 2026 working tree (awaiting push) - voice process death root-caused and
+fixed on-device; updater TLS fixed with bundled roots:
+
+Voice process death (the real root cause, proven on Redmi Note 4):
+
+- The ":voice" process exits were never memory pressure. v1.1.44's hotword
+  wiring made sherpa-onnx fatally exit(255) the whole process, two chained
+  config bugs: (a) hotwords.txt was staged at an absolute cache path while a
+  non-null AssetManager is set - sherpa refuses absolute asset paths; (b) the
+  modeling unit was left empty, so utils.cc EncodeHotwords hit a fatal
+  ("modelingUnit" unset). The generic low-memory death toast mislabeled this
+  on every device.
+- Fix: pass the relative asset name "hotwords.txt" (no cache staging) and
+  declare the sentencepiece vocab explicitly: setModelingUnit("bpe") +
+  setBpeVocab(<model dir>/tokens.txt) - "bpe" matches the file's
+  sentencepiece tokens (500-token Bengali vocab); "cjkchar" would be all-OOV
+  at word-initial pieces. Out-of-vocabulary hotwords only log a skip warning,
+  they do not kill the process.
+- Honesty fix: the process-death toast no longer claims a memory cause; it
+  now says the voice process stopped unexpectedly and offers a retry.
+- Resilience kept and proven: the active voice session is promoted to a
+  microphone-type foreground service (notification id=1041) for the session
+  duration, and MainActivity silently retries relaunching the :voice process
+  (voiceDeathRetries) if it still dies.
+- On-device proof (Note 4, Android 7): one process survived the whole session
+  (adj 100 while active), voice-model-loaded pssKb~73-80 MB, decode-load
+  ratio 0.28-0.33 (3-4x realtime headroom), FGS notification appears during
+  the session and is removed after, no hotword-encode errors.
+- Accuracy measured with the developer's own voice: a plainly spoken line
+  garbled in the transcript ("তার বিনা") yet the fuzzy matcher surfaced the
+  exact right song at the top of the suggestions. Sung lines garble harder
+  (expected for a 500-token read-speech model on melodic recitation);
+  transcript-tuning (fuzzy thresholds, hotword score) deliberately deferred
+  until after release - every tweak risks stray matches without data.
+
+Updater TLS (Redmi Note 4 SSL failure):
+
+- Root cause: Android 7 device trust store does not anchor the update
+  hosts' chain; v1.1.40's check fails with CertPathValidatorException
+  ("Trust anchor for certification path not found").
+- Fix: app/src/main/assets/certs/ bundles 12 PEM roots; AppUpdater builds a
+  KeyManagerFactory-backed SSLContext merging system CAs with the bundled
+  roots (trustedSslFactory) and both HTTP call sites (mirror manifest + APK
+  download) use it. Nothing user-visible changes on healthy devices.
+- A/B proof on the same Note 4 minutes apart: v1.1.40 logs
+  "Update check failed: ...CertPathValidatorException..."; the fixed build
+  shows zero AshkeUpdater failures across two launches with the 24h throttle
+  cleared (a failure would have logged - onError logs in silent mode too).
+
+Release: next dispatch -> v1.1.46-beta, versionCode 1046 (run-number math
+1000 + 46). Release notes bullets for the voice fix and the updater fix are
+in .github/workflows/release-apk.yml. tests/validate_catalog.py extended to
+assert FGS permissions/service type, cert bundle size, and the hotword fix
+(relative asset path + modelingUnit/bpeVocab) - all green.

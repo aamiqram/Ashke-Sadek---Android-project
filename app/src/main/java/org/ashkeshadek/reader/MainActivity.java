@@ -160,6 +160,7 @@ public class MainActivity extends Activity {
     private ServiceConnection voiceServiceConnection;
     private boolean voiceServiceStarted;
     private boolean voiceServiceBound;
+    private int voiceDeathRetries;
     private AlertDialog voiceDialog;
     private TextView voiceStatus;
     private LinearLayout voiceCandidates;
@@ -2145,6 +2146,7 @@ public class MainActivity extends Activity {
         lastVoiceCandidateQuery = "";
         lastVoiceCandidateUpdateMs = 0L;
         voiceSessionStartedUptimeMs = SystemClock.uptimeMillis();
+        voiceDeathRetries = 0;
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -2248,7 +2250,22 @@ public class MainActivity extends Activity {
             }
         };
 
+        launchVoiceService();
+    }
+
+    /**
+     * Starts (or restarts) the isolated voice process for the open session.
+     * Reused by the process-death retry: a fresh process rebuilds the engine
+     * and keeps reporting into the same dialog and receiver.
+     */
+    private void launchVoiceService() {
         try {
+            if (voiceServiceConnection != null) {
+                try {
+                    unbindService(voiceServiceConnection);
+                } catch (Exception ignored) {
+                }
+            }
             Intent startIntent = new Intent(this, VoiceRecognitionService.class)
                     .setAction(VoiceRecognitionService.ACTION_START)
                     .putExtra(VoiceRecognitionService.EXTRA_RECEIVER, voiceReceiver);
@@ -2262,12 +2279,19 @@ public class MainActivity extends Activity {
                 }
                 @Override public void onServiceDisconnected(ComponentName name) {
                     voiceServiceBound = false;
-                    if (voiceDialog != null && !voiceSessionCompleted) {
-                        finishVoiceDialog();
-                        Toast.makeText(MainActivity.this,
-                                "কম মেমরির কারণে ভয়েস প্রসেস বন্ধ হয়েছে। আবার চেষ্টা করুন।",
-                                Toast.LENGTH_LONG).show();
+                    if (voiceDialog == null || voiceSessionCompleted) return;
+                    // A memory keeper can still reclaim even a foreground-ranked
+                    // process on very full phones. One silent retry keeps the
+                    // dialog alive; only a repeated death surfaces the message.
+                    if (voiceDeathRetries < 1) {
+                        voiceDeathRetries++;
+                        launchVoiceService();
+                        return;
                     }
+                    finishVoiceDialog();
+                    Toast.makeText(MainActivity.this,
+                            "ভয়েস প্রসেস অপ্রত্যাশিতভাবে বন্ধ হয়ে গেছে। আবার চেষ্টা করুন।",
+                            Toast.LENGTH_LONG).show();
                 }
                 @Override public void onBindingDied(ComponentName name) {
                     onServiceDisconnected(name);
@@ -2350,7 +2374,7 @@ public class MainActivity extends Activity {
         if (manager == null) return false;
         ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
         manager.getMemoryInfo(memory);
-        long minimumRam = 3L * 1024L * 1024L * 1024L;
+        long minimumRam = 2L * 1024L * 1024L * 1024L;
         return memory.totalMem >= minimumRam && memory.availMem >= 256L * 1024L * 1024L;
     }
 

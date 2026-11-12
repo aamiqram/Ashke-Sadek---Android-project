@@ -327,6 +327,13 @@ final class OfflineBengaliVoice {
         model.setDebug(false);
         model.setProvider("cpu");
         model.setModelType("zipformer2");
+        // Hotword encoding requires the tokenizer's unit: "bpe" makes sherpa
+        // encode every hotword with a sentencepiece encoder built from
+        // bpe_vocab (the model's own tokens.txt, whose pieces carry the
+        // word-start marker, exactly like the trained tokenizer). An empty
+        // unit makes the encoder exit the whole :voice process at startup.
+        model.setModelingUnit("bpe");
+        model.setBpeVocab(MODEL_DIR + "/tokens.txt");
         OnlineRecognizerConfig config = new OnlineRecognizerConfig();
         config.setFeatConfig(feature);
         config.setModelConfig(model);
@@ -349,27 +356,19 @@ final class OfflineBengaliVoice {
     }
 
     /**
-     * sherpa-onnx reads the hotword list from the filesystem, so stage the
-     * bundled asset into cache storage and return its absolute path. An empty
-     * return keeps the session alive without biasing instead of failing it.
+     * sherpa-onnx reads every config file through the AssetManager it is
+     * given for relative paths, and fatally refuses absolute paths while the
+     * manager is set (upstream issue #2562 — the recognizer would exit the
+     * whole :voice process), so the bundled asset is referenced by its
+     * relative name exactly like the model files. An empty return keeps the
+     * session alive without biasing instead of failing it.
      */
     private String stageHotwordsFile() {
-        java.io.File staged = new java.io.File(context.getCacheDir(), HOTWORDS_ASSET);
-        java.io.InputStream in = null;
-        java.io.OutputStream out = null;
-        try {
-            in = context.getAssets().open(HOTWORDS_ASSET);
-            out = new java.io.FileOutputStream(staged);
-            byte[] buffer = new byte[8192];
-            int read;
-            while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
-            return staged.getAbsolutePath();
+        try (java.io.InputStream probe = context.getAssets().open(HOTWORDS_ASSET)) {
+            return HOTWORDS_ASSET;
         } catch (Exception failure) {
             Log.w("AshkeShadekVoice", "Hotword file unavailable; continuing unbiased", failure);
             return "";
-        } finally {
-            try { if (in != null) in.close(); } catch (Exception ignored) { }
-            try { if (out != null) out.close(); } catch (Exception ignored) { }
         }
     }
 

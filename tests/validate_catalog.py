@@ -57,6 +57,12 @@ thread_counts = [int(match) for match in re.findall(r"model\.setNumThreads\((\d+
 assert thread_counts and max(thread_counts) <= 2, "ASR thread count must stay bounded"
 assert "Process.killProcess(Process.myPid())" in voice_service, "Voice process must exit after a session"
 assert "voice-model-loaded" in voice_service, "Voice PSS telemetry missing"
+assert "startForeground" in voice_service, "Voice process must be foreground-ranked during model load"
+assert "demoteFromForeground" in voice_service, "Voice FGS notification must drop after the session"
+assert "getCacheDir(), HOTWORDS_ASSET" not in voice_source, "Hotwords must not be staged to an absolute cache path (sherpa-onnx refuses that fatally while the AssetManager is set)"
+assert "return HOTWORDS_ASSET;" in voice_source, "Hotwords must load via the relative asset path"
+assert 'setModelingUnit("bpe")' in voice_source, "Hotword encoding needs the tokenizer unit; an empty unit exits the voice process"
+assert 'setBpeVocab(MODEL_DIR + "/tokens.txt")' in voice_source, "BPE hotword encoder must be built from the model's tokens.txt"
 
 # The emphasis asset has one entry for every paragraph, with valid source-relative spans.
 all_blocks = [block for song in songs for block in song.get("lyricBlocks", [])]
@@ -91,6 +97,8 @@ permissions = {node.attrib.get(android + "name") for node in root.findall("uses-
 assert "android.permission.INTERNET" in permissions, "Internet permission required for release update checks"
 assert "android.permission.REQUEST_INSTALL_PACKAGES" in permissions, "Install-package permission missing"
 assert "android.permission.RECORD_AUDIO" in permissions, "Voice permission declaration missing"
+assert "android.permission.FOREGROUND_SERVICE" in permissions, "Foreground-service permission missing"
+assert "android.permission.FOREGROUND_SERVICE_MICROPHONE" in permissions, "FGS microphone permission missing"
 application = root.find("application")
 assert application is not None
 
@@ -106,6 +114,10 @@ assert "installedCertificate" in updater_source
 assert "session.commit" in updater_source and "PackageInstaller" in updater_source
 assert "getContentLengthLong" not in updater_source, "Updater must remain compatible with minSdk 21"
 assert "ACTION_MANAGE_UNKNOWN_APP_SOURCES" in updater_source
+assert "trustedSslFactory" in updater_source, "Updater must trust the bundled modern roots"
+assert "setSSLSocketFactory(trustedSslFactory())" in updater_source, "Bundled-root factory must be wired into every HTTPS call"
+bundled_roots = sorted((ROOT / "app/src/main/assets/certs").glob("*.pem"))
+assert len(bundled_roots) >= 8, f"Expected bundled root certificates, found {len(bundled_roots)}"
 assert "STATUS_PENDING_USER_ACTION" in receiver_source
 assert "ASHKE_KEYSTORE_BASE64" in build_workflow
 assert "ashke-shadek-signed-release-apk" in release_workflow
@@ -120,6 +132,7 @@ voice_services = [node for node in application.findall("service")
 assert len(voice_services) == 1, "Voice subprocess service declaration missing"
 assert voice_services[0].attrib.get(android + "process") == ":voice"
 assert voice_services[0].attrib.get(android + "exported") == "false"
+assert voice_services[0].attrib.get(android + "foregroundServiceType") == "microphone"
 
 for xml_path in [ROOT / "app/src/main/res/values/styles.xml", ROOT / "app/src/main/res/drawable/ic_book.xml"]:
     ET.parse(xml_path)

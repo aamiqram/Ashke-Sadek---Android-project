@@ -59,6 +59,7 @@ public final class VoiceRecognitionService extends Service {
             if (!engine.isRunning()) engine.start();
         } else if (ACTION_START.equals(action)) {
             cancelIdleShutdown();
+            promoteToForeground();
             if (engine == null) {
                 createEngine();
                 engine.start();
@@ -99,6 +100,62 @@ public final class VoiceRecognitionService extends Service {
         return START_NOT_STICKY;
     }
 
+    private static final int FOREGROUND_NOTIFICATION_ID = 1041;
+    private static final String FOREGROUND_CHANNEL_ID = "ashke_voice_session";
+
+    /**
+     * Promotes this process to foreground rank while the heavy model loads and
+     * the microphone stays open. Aggressive memory keepers (MIUI and friends)
+     * reclaim background service processes at a fraction of their free-memory
+     * thresholds, which killed the loader mid-run on every tested device; a
+     * foreground service is the platform-sanctioned protection against that.
+     */
+    private void promoteToForeground() {
+        try {
+            android.app.Notification notification = buildForegroundNotification();
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(FOREGROUND_NOTIFICATION_ID, notification,
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+            } else {
+                startForeground(FOREGROUND_NOTIFICATION_ID, notification);
+            }
+        } catch (Exception failure) {
+            Log.w("AshkeShadekVoice", "Foreground promotion unavailable", failure);
+        }
+    }
+
+    /** Session over or process shutting down: drop the rank and the notification. */
+    private void demoteFromForeground() {
+        try {
+            stopForeground(true);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private android.app.Notification buildForegroundNotification() {
+        if (Build.VERSION.SDK_INT >= 26) {
+            android.app.NotificationManager manager =
+                    (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (manager != null && manager.getNotificationChannel(FOREGROUND_CHANNEL_ID) == null) {
+                android.app.NotificationChannel channel = new android.app.NotificationChannel(
+                        FOREGROUND_CHANNEL_ID, "কণ্ঠ খোঁজা",
+                        android.app.NotificationManager.IMPORTANCE_LOW);
+                channel.setDescription("মাইক্রোফোন শোনার সময় স্ট্যাটাস বারে দেখা যায়।");
+                channel.setSound(null, null);
+                manager.createNotificationChannel(channel);
+            }
+        }
+        android.app.Notification.Builder builder = Build.VERSION.SDK_INT >= 26
+                ? new android.app.Notification.Builder(this, FOREGROUND_CHANNEL_ID)
+                : new android.app.Notification.Builder(this);
+        return builder
+                .setSmallIcon(R.drawable.ic_book)
+                .setContentTitle("এশকে ছাদেক — কণ্ঠ শুনছে")
+                .setContentText("গানের একটি লাইন বলুন—সম্ভাব্য গান সামনে আসবে।")
+                .setOngoing(true)
+                .build();
+    }
+
     private void createEngine() {
         engine = new OfflineBengaliVoice(this, new OfflineBengaliVoice.Listener() {
                 @Override public void onStatus(String message) {
@@ -129,6 +186,7 @@ public final class VoiceRecognitionService extends Service {
                 }
 
                 @Override public void onFinished() {
+                    demoteFromForeground();
                     sendEmpty(RESULT_FINISHED);
                     if (stopAfterFinish) finishShutdown();
                     else scheduleIdleShutdown();
@@ -171,6 +229,7 @@ public final class VoiceRecognitionService extends Service {
     }
 
     private void finishShutdown() {
+        demoteFromForeground();
         cancelIdleShutdown();
         if (engine != null) {
             OfflineBengaliVoice old = engine;
@@ -220,6 +279,7 @@ public final class VoiceRecognitionService extends Service {
     }
 
     @Override public void onDestroy() {
+        demoteFromForeground();
         cancelIdleShutdown();
         if (engine != null) {
             engine.release();

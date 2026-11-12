@@ -29,6 +29,16 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.MessageDigest;
 import java.util.Locale;
+import java.security.KeyStore;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
 
 final class AppUpdater {
     private static final String RELEASES_API =
@@ -47,6 +57,8 @@ final class AppUpdater {
     private static final String PENDING_VERSION = "pending_version";
     private static final long MAX_APK_BYTES = 250L * 1024L * 1024L;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static Context appContext;
+    private static SSLSocketFactory updaterSslFactory;
 
     interface CheckCallback {
         void onUpdateAvailable(UpdateInfo update);
@@ -89,6 +101,7 @@ final class AppUpdater {
 
     static void checkForUpdates(Context context, CheckCallback callback) {
         Context app = context.getApplicationContext();
+        appContext = app;
         new Thread(() -> {
             long installedVersion;
             String installedCertificate;
@@ -246,6 +259,7 @@ final class AppUpdater {
     }
 
     static void downloadAndInstall(Activity activity, UpdateInfo update, InstallCallback callback) {
+        appContext = activity.getApplicationContext();
         if (update.requiresMigration) {
             MAIN.post(() -> callback.onMigrationRequired(
                     "এই আপডেটটি বর্তমান ইনস্টল করা অ্যাপের সাইনিং সার্টিফিকেটে সই করা নয়। "
@@ -331,6 +345,7 @@ final class AppUpdater {
             return;
         }
 
+        appContext = activity.getApplicationContext();
         new Thread(() -> {
             try {
                 if (!sameFingerprint(sha256(apk), sha)) {
@@ -452,6 +467,48 @@ final class AppUpdater {
         return toHex(digest.digest(signatures[0].toByteArray()));
     }
 
+    /**
+     * System trust anchors plus the bundled modern roots: Android 5-7 devices
+     * shipped with trust stores too old for GitHub's current certificate
+     * chains, which failed every update check with "trust anchor not found".
+     * The bundled files add widely-used public roots only; hostname
+     * verification remains the platform default.
+     */
+    private static synchronized SSLSocketFactory trustedSslFactory() throws Exception {
+        if (updaterSslFactory != null) return updaterSslFactory;
+        TrustManagerFactory system = TrustManagerFactory.getInstance(
+                TrustManagerFactory.getDefaultAlgorithm());
+        system.init((KeyStore) null);
+        KeyStore merged = KeyStore.getInstance(KeyStore.getDefaultType());
+        merged.load(null, null);
+        int index = 0;
+        for (TrustManager manager : system.getTrustManagers()) {
+            if (manager instanceof X509TrustManager) {
+                for (X509Certificate anchor : ((X509TrustManager) manager).getAcceptedIssuers()) {
+                    merged.setCertificateEntry("system-" + index++, anchor);
+                }
+            }
+        }
+        CertificateFactory parser = CertificateFactory.getInstance("X.509");
+        if (appContext != null) {
+            for (String assetName : appContext.getAssets().list("certs")) {
+                try (InputStream in = appContext.getAssets().open("certs/" + assetName)) {
+                    int copy = 0;
+                    for (Certificate cert : parser.generateCertificates(in)) {
+                        merged.setCertificateEntry(assetName + "-" + copy++, cert);
+                    }
+                }
+            }
+        }
+        TrustManagerFactory mergedFactory = TrustManagerFactory.getInstance(
+                TrustManagerFactory.getDefaultAlgorithm());
+        mergedFactory.init(merged);
+        SSLContext ssl = SSLContext.getInstance("TLS");
+        ssl.init(null, mergedFactory.getTrustManagers(), null);
+        updaterSslFactory = ssl.getSocketFactory();
+        return updaterSslFactory;
+    }
+
     private static void downloadApk(String url, File destination) throws Exception {
         if (!url.startsWith(RELEASE_ASSET_PREFIX)) {
             throw new IllegalStateException("অনুমোদিত GitHub release URL ছাড়া APK ডাউনলোড করা যাবে না।");
@@ -461,6 +518,9 @@ final class AppUpdater {
         connection.setReadTimeout(120000);
         connection.setInstanceFollowRedirects(true);
         connection.setRequestProperty("User-Agent", "AshkeShadek-Android-Updater/1.0");
+        if (connection instanceof HttpsURLConnection && appContext != null) {
+            ((HttpsURLConnection) connection).setSSLSocketFactory(trustedSslFactory());
+        }
         try {
             int response = connection.getResponseCode();
             if (response < 200 || response >= 300) {
@@ -500,6 +560,9 @@ final class AppUpdater {
         connection.setInstanceFollowRedirects(true);
         connection.setRequestProperty("Accept", "application/vnd.github+json");
         connection.setRequestProperty("User-Agent", "AshkeShadek-Android-Updater/1.0");
+        if (connection instanceof HttpsURLConnection && appContext != null) {
+            ((HttpsURLConnection) connection).setSSLSocketFactory(trustedSslFactory());
+        }
         try {
             int response = connection.getResponseCode();
             if (response < 200 || response >= 300) {
