@@ -28,6 +28,7 @@ import android.text.Layout;
 import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.style.LeadingMarginSpan;
+import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -494,9 +495,18 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Same packaging rule as the catalogue: the shipped sidecar is plain lyrics_emphasis.json. */
+    private InputStream openEmphasis() throws Exception {
+        try {
+            return new GZIPInputStream(getAssets().open("lyrics_emphasis.json.gz"));
+        } catch (Exception missingGz) {
+            return getAssets().open("lyrics_emphasis.json");
+        }
+    }
+
     /** Applies the exact bold character ranges extracted from the original Word runs. */
     private void loadEmphasis() {
-        try (InputStream input = new GZIPInputStream(getAssets().open("lyrics_emphasis.json.gz"));
+        try (InputStream input = openEmphasis();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[4096];
             int count;
@@ -2053,8 +2063,15 @@ public class MainActivity extends Activity {
                 if (block.boldSpans != null) for (int[] span : block.boldSpans) {
                     int start = Math.max(0, Math.min(span[0], styled.length()));
                     int end = Math.max(start, Math.min(span[1], styled.length()));
-                    if (end > start) styled.setSpan(new SerifEmphasisSpan(), start, end,
-                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    if (end > start) {
+                        styled.setSpan(new SerifEmphasisSpan(), start, end,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                        // The print shop's bold cut also rides a hair larger
+                        // than the body; at the default 16sp this is the
+                        // reader's own +2 step, scaled with the chosen size.
+                        styled.setSpan(new RelativeSizeSpan(1.125f), start, end,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    }
                 }
                 if (leftIndent > 0 || firstIndent > 0) {
                     styled.setSpan(new LeadingMarginSpan.Standard(firstIndent, leftIndent),
