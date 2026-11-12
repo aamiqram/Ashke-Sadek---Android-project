@@ -1188,6 +1188,11 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        // The Android 5-7 installer confirm returns no data URI.
+        if (requestCode == AppUpdater.REQUEST_INSTALL_APK) {
+            AppUpdater.onInstallResult(requestCode, resultCode);
+            return;
+        }
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         try {

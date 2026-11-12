@@ -14,6 +14,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.util.Log;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -51,6 +52,9 @@ final class AppUpdater {
     private static final String MIRROR_MANIFEST_URL =
             "https://raw.githubusercontent.com/aamiqram/Ashke-Sadek---Android-project/update-mirror/update.json";
     private static final String PREFS = "ashke_update_state";
+    private static final String TAG = "AshkeUpdater";
+    /** startActivityForResult code for the Android 5-7 installer confirm. */
+    static final int REQUEST_INSTALL_APK = 514;
     private static final String PENDING_PATH = "pending_path";
     private static final String PENDING_SHA = "pending_sha";
     private static final String PENDING_CERT = "pending_cert";
@@ -276,7 +280,7 @@ final class AppUpdater {
                 if (!directory.exists() && !directory.mkdirs()) {
                     throw new IllegalStateException("আপডেট সংরক্ষণের জায়গা তৈরি করা যায়নি।");
                 }
-                apk = new File(directory, "ashke-shadek-update.apk");
+                apk = new File(directory, UpdateApkProvider.UPDATE_APK_FILE);
                 downloadApk(update.apkUrl, apk);
 
                 postStatus(callback, "ডাউনলোড যাচাই করা হচ্ছে…");
@@ -348,6 +352,14 @@ final class AppUpdater {
         appContext = activity.getApplicationContext();
         new Thread(() -> {
             try {
+                if (version > 0 && installedVersionCode(activity) >= version) {
+                    // The pending update already landed (the installer confirm
+                    // completed while the app was dead): discard the leftover
+                    // file and record instead of reinstalling the same build.
+                    apk.delete();
+                    clearPending(state);
+                    return;
+                }
                 if (!sameFingerprint(sha256(apk), sha)) {
                     apk.delete();
                     clearPending(state);
@@ -395,7 +407,18 @@ final class AppUpdater {
                 .remove(PENDING_CERT).remove(PENDING_VERSION).apply();
     }
 
-    private static void installVerifiedApk(Context context, File apk, InstallCallback callback)
+    private static void installVerifiedApk(Activity activity, File apk, InstallCallback callback)
+            throws Exception {
+        if (Build.VERSION.SDK_INT >= 26) installViaSession(activity, apk, callback);
+        else installViaInstallerIntent(activity, apk, callback);
+    }
+
+    /**
+     * Android 8+ session flow: the app streams the verified APK into a
+     * PackageInstaller session and commits it; the platform then asks the
+     * user to confirm (gated by the "install unknown apps" permission).
+     */
+    private static void installViaSession(Context context, File apk, InstallCallback callback)
             throws Exception {
         PackageInstaller installer = context.getPackageManager().getPackageInstaller();
         PackageInstaller.SessionParams params =
@@ -428,6 +451,53 @@ final class AppUpdater {
             if (session != null) session.close();
             if (!committed) installer.abandonSession(sessionId);
         }
+    }
+
+    /**
+     * Android 5-7 fallback: MIUI rejects the app's own programmatic
+     * PackageInstaller commits with "Permission Denied" (observed on a
+     * Redmi Note 4 - MIUILOG Install Reject uid 10459, PackageInstaller
+     * Commit Permission Denied). Hand the verified APK to the platform
+     * installer UI instead, so the user confirms with the same dialog any
+     * file manager's APK install shows. API 24/25 must pass a content
+     * URI (a file:// URI trips StrictMode on apps targeting N and later);
+     * API 21-23 accept the file path directly.
+     */
+    private static void installViaInstallerIntent(Activity activity, File apk,
+            InstallCallback callback) {
+        // The installer reads the APK while its dialog is up, so the file
+        // and the pending record survive until the install lands or the
+        // user cancels (resumePendingInstall re-offers it on next launch).
+        MAIN.post(() -> {
+            try {
+                Uri apkUri = Build.VERSION.SDK_INT >= 24
+                        ? UpdateApkProvider.uriFor(activity, apk)
+                        : Uri.fromFile(apk);
+                Intent install = new Intent(Intent.ACTION_INSTALL_PACKAGE)
+                        .setDataAndType(apkUri, UpdateApkProvider.APK_MIME)
+                        .putExtra(Intent.EXTRA_RETURN_RESULT, true)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                Log.i(TAG, "Opening the platform installer on API "
+                        + Build.VERSION.SDK_INT);
+                activity.startActivityForResult(install, REQUEST_INSTALL_APK);
+                postStatus(callback, "Android-এর ইনস্টল নিশ্চিতকরণ খুলছে…");
+            } catch (Exception error) {
+                Log.i(TAG, "Platform installer could not open: " + error);
+                postError(callback, "Android-এর ইনস্টলার খোলা যায়নি। আবার আপডেট খুঁজুন।");
+            }
+        });
+    }
+
+    /** Result of the Android 5-7 installer confirm; OK means the update landed. */
+    static void onInstallResult(int requestCode, int resultCode) {
+        if (requestCode != REQUEST_INSTALL_APK || appContext == null) return;
+        Log.i(TAG, "Installer confirm returned " + resultCode);
+        // Final for this attempt either way: resumePendingInstall fires on
+        // every onResume, so keeping the record on a cancel would re-open
+        // the installer dialog the instant the user returns to the app.
+        // A cancelled update can be fetched again from the update check.
+        UpdateApkProvider.pendingApkFile(appContext).delete();
+        clearPending(appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE));
     }
 
     private static PackageInfo archivePackageInfo(Context context, File apk) {

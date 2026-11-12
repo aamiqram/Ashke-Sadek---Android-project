@@ -11,6 +11,9 @@
         android:supportsRtl="true" android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">
         <receiver android:name=".UpdateInstallReceiver" android:exported="false" />
+        <provider android:name=".UpdateApkProvider"
+            android:authorities="org.ashkeshadek.reader.updateapk"
+            android:exported="false" android:grantUriPermissions="true" />
         <service android:name=".VoiceRecognitionService"
             android:process=":voice" android:exported="false" android:stopWithTask="true"
             android:foregroundServiceType="microphone" />

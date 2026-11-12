@@ -392,3 +392,42 @@ glass (verified on the Note 4, local build 1.1.50-local/1050):
 
 Release: this push consumes run #52 (build); user dispatch = run #53
 -> v1.1.53-beta / versionCode 1053.
+
+
+Phase 2c - in-app self-update works on MIUI / Android 5-7 (fix verified
+against the live failure on the Note 4, local build 1.1.50-local/1050):
+
+- Diagnosis from the device's own logcat when the released 1.1.53-beta
+  self-update failed on the Redmi Note 4 (MIUI, Android 7): the download,
+  SHA-256 check, package-name/version check and signer verification all
+  succeeded; MIUI itself rejected the app's programmatic PackageInstaller
+  session commit - 'MIUILOG- Install Reject uid: 10459 pkg
+  org.ashkeshadek.reader' followed by 'PackageInstaller: Commit of session
+  ... failed: Permission Denied'. MIUI's guard only allows market/adb
+  installers to commit sessions; every third-party app hits this on
+  Android 5-7. The APK was never the problem (adb install of the same
+  release APK succeeds; sha256 verified against SHA256SUMS.txt).
+- Fix: installVerifiedApk() now branches. Android 8+ keeps the existing
+  PackageInstaller session path (stock Android confirms it through the
+  'install unknown apps' permission flow, unchanged). Android 5-7 hand
+  the verified APK to the platform installer UI instead - the same
+  confirm dialog any file manager's APK install shows, which MIUI does
+  not block: ACTION_INSTALL_PACKAGE + EXTRA_RETURN_RESULT with a granted
+  read URI. API 24/25 pass a content URI from a new tiny hand-rolled
+  UpdateApkProvider (read-only, not exported, serves exactly the one
+  verified file files/updates/ashke-shadek-update.apk; a file:// URI
+  would trip StrictMode on apps targeting N+); API 21-23 pass the file
+  path directly. onActivityResult returns the installer's verdict and
+  treats it as final for that attempt (OK or cancel both delete the APK
+  and the pending record) - resumePendingInstall fires on every
+  onResume, so keeping a cancelled record would re-open the installer
+  dialog in a loop the instant the user returns to the app.
+  resumePendingInstall also now discards the pending file when the
+  installed version already matches (the confirm can complete while the
+  app is dead).
+- No new permissions (REQUEST_INSTALL_PACKAGES was already declared) and
+  no new dependencies - the provider is ~90 lines of framework code, so
+  the APK stays the same size.
+
+Release: this push consumes run #54 (build); user dispatch = run #55 ->
+v1.1.55-beta / versionCode 1055.
