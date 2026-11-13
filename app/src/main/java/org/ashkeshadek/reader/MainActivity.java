@@ -235,9 +235,44 @@ public class MainActivity extends Activity {
             // release.
             checkForAppUpdates(true);
         } else if (System.currentTimeMillis() - lastUpdateCheck
-                >= 24L * 60L * 60L * 1000L) {
+                >= 60L * 60L * 1000L) {
+            // Opening the app is a check too, with only an hourly floor so
+            // rapid open-close cycles do not hammer the network: this is the
+            // popup a user actually sees when a release is out.
             checkForAppUpdates(false);
         }
+        scheduleUpdateCheckJob();
+    }
+
+    /**
+     * Framework JobScheduler probe (API 21+, no external dependency, no APK
+     * size cost): a few times a day the system wakes a short background
+     * check, so a release published while the reader is closed still posts
+     * its shade notification within about half an hour. Re-scheduling on
+     * every open is idempotent and also re-arms a job a force-stop
+     * (MIUI/vivo) cancelled.
+     */
+    private void scheduleUpdateCheckJob() {
+        try {
+            android.app.job.JobScheduler scheduler = (android.app.job.JobScheduler)
+                    getSystemService(JOB_SCHEDULER_SERVICE);
+            if (scheduler == null) return;
+            android.app.job.JobInfo.Builder builder = new android.app.job.JobInfo.Builder(
+                    UpdateCheckJobService.JOB_ID,
+                    new android.content.ComponentName(this, UpdateCheckJobService.class))
+                    .setRequiredNetworkType(android.app.job.JobInfo.NETWORK_TYPE_ANY)
+                    .setPeriodic(UpdateCheckJobService.PERIOD_MS);
+            if (Build.VERSION.SDK_INT >= 24) builder.setPersisted(true);
+            scheduler.schedule(builder.build());
+        } catch (Exception error) {
+            Log.i("AshkeUpdater", "Background update check not scheduled: " + error);
+        }
+    }
+
+    /** One shared timestamp for the hourly on-open check cooldown. */
+    static void recordUpdateCheck(Context context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putLong("last_update_check_ms", System.currentTimeMillis()).apply();
     }
 
     private void renderStartupScreen() {
@@ -1215,6 +1250,13 @@ public class MainActivity extends Activity {
         // The Android 5-7 installer confirm returns no data URI.
         if (requestCode == AppUpdater.REQUEST_INSTALL_APK) {
             AppUpdater.onInstallResult(requestCode, resultCode);
+            if (resultCode == RESULT_OK) {
+                // MIUI's own installer may take minutes on old phones before
+                // returning; close the loop so the wait clearly ended.
+                Toast.makeText(this,
+                        "নতুন সংস্করণ ইনস্টল হয়েছে — অ্যাপটি আবার খুললে নতুন সংস্করণ দেখা যাবে।",
+                        Toast.LENGTH_LONG).show();
+            }
             return;
         }
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
@@ -1249,7 +1291,7 @@ public class MainActivity extends Activity {
                     // Every fresh detection posts a shade reminder so the
                     // update stays visible even after the dialog was once
                     // put off; the dialog itself still honours the dismissal.
-                    postUpdateNotification(update);
+                    postUpdateNotification(MainActivity.this, update);
                     if (dismissed == update.versionCode) return;
                 }
                 showUpdateAvailable(update);
@@ -1274,19 +1316,21 @@ public class MainActivity extends Activity {
      * Shade reminder for a freshly detected update: tapping it re-opens the
      * app and runs a fresh check that always offers download-and-install.
      * Silent when the system has notifications switched off (API 33+ runtime
-     * toggle); the in-app dialog remains the primary notice there.
+     * toggle); the in-app dialog remains the primary notice there. Static so
+     * the background job can post it without an activity; setOnlyAlertOnce
+     * keeps repeat posts (every 30-minute job run) silent.
      */
-    private void postUpdateNotification(AppUpdater.UpdateInfo update) {
+    static void postUpdateNotification(Context context, AppUpdater.UpdateInfo update) {
         NotificationManager manager =
-                (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager == null) return;
         if (Build.VERSION.SDK_INT >= 24 && !manager.areNotificationsEnabled()) return;
 
-        Intent open = new Intent(this, MainActivity.class)
+        Intent open = new Intent(context, MainActivity.class)
                 .putExtra(EXTRA_OPEN_UPDATE, true)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP
                         | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent content = PendingIntent.getActivity(this, REQUEST_OPEN_UPDATE,
+        PendingIntent content = PendingIntent.getActivity(context, REQUEST_OPEN_UPDATE,
                 open, PendingIntent.FLAG_UPDATE_CURRENT);
 
         String title = "এশকে ছাদেক — নতুন সংস্করণ";
@@ -1299,16 +1343,18 @@ public class MainActivity extends Activity {
                     NotificationManager.IMPORTANCE_DEFAULT);
             channel.setDescription("নতুন সংস্করণের ঘোষণা");
             manager.createNotificationChannel(channel);
-            notification = new Notification.Builder(this, UPDATE_NOTIFICATION_CHANNEL)
+            notification = new Notification.Builder(context, UPDATE_NOTIFICATION_CHANNEL)
                     .setSmallIcon(R.drawable.ic_book).setColor(GREEN_DARK)
                     .setContentTitle(title).setContentText(text)
-                    .setContentIntent(content).setAutoCancel(true).build();
+                    .setContentIntent(content).setAutoCancel(true)
+                    .setOnlyAlertOnce(true).build();
         } else {
             //noinspection deprecation
-            notification = new Notification.Builder(this)
+            notification = new Notification.Builder(context)
                     .setSmallIcon(R.drawable.ic_book).setColor(GREEN_DARK)
                     .setContentTitle(title).setContentText(text)
-                    .setContentIntent(content).setAutoCancel(true).build();
+                    .setContentIntent(content).setAutoCancel(true)
+                    .setOnlyAlertOnce(true).build();
         }
         manager.notify(UPDATE_NOTIFICATION_ID, notification);
     }
@@ -1336,6 +1382,7 @@ public class MainActivity extends Activity {
                     + "একবারের মাইগ্রেশন প্রয়োজন; পুরোনো অ্যাপ আনইনস্টল করলে স্থানীয় প্রিয় গান ও বুকমার্ক মুছে যেতে পারে।");
         } else {
             message.append("\n\nAPK যাচাই করে Android-এর ইনস্টল নিশ্চিতকরণে আপডেট হবে। "
+                    + "পুরোনো ফোনে ইনস্টলে কয়েক মিনিট লাগতে পারে — Android-এর ইনস্টলার নিজেই অগ্রগতি দেখায়। "
                     + "একই সাইনিং কী থাকলে আপনার প্রিয় গান ও বুকমার্ক থাকবে।");
         }
 

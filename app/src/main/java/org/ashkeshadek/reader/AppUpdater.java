@@ -325,7 +325,8 @@ final class AppUpdater {
 
                 if (Build.VERSION.SDK_INT >= 26
                         && !activity.getPackageManager().canRequestPackageInstalls()) {
-                    savePending(activity, apk, update);
+                    savePending(activity, apk, update.sha256, update.certificateSha256,
+                            update.versionCode);
                     MAIN.post(() -> {
                         callback.onPermissionRequired();
                         try {
@@ -338,6 +339,13 @@ final class AppUpdater {
                     });
                     return;
                 }
+                // Record before the installer handoff too: if the vendor UI
+                // (MIUI) kills the app while Android's installer dialog is
+                // up, the next launch still knows the verified APK exists -
+                // it resumes the confirm, or cleans up when the update
+                // already landed.
+                savePending(activity, apk, update.sha256, update.certificateSha256,
+                        update.versionCode);
                 installVerifiedApk(activity, apk, callback);
             } catch (Exception error) {
                 if (apk != null && apk.exists()) apk.delete();
@@ -356,7 +364,13 @@ final class AppUpdater {
         String sha = state.getString(PENDING_SHA, "");
         String cert = state.getString(PENDING_CERT, "");
         long version = state.getLong(PENDING_VERSION, -1L);
-        if (path == null || path.isEmpty()) return;
+        if (path == null || path.isEmpty()) {
+            // No pending update: drop any leftover verified APK from an
+            // install whose confirming app process the vendor UI (MIUI)
+            // killed without a result.
+            UpdateApkProvider.pendingApkFile(activity).delete();
+            return;
+        }
 
         File apk = new File(path);
         if (!apk.isFile() || !isSha256(sha) || !isSha256(cert)) {
@@ -389,6 +403,7 @@ final class AppUpdater {
                     clearPending(state);
                     return;
                 }
+                savePending(activity, apk, sha, cert, version);
                 installVerifiedApk(activity, apk, new InstallCallback() {
                     @Override public void onStatus(String message) { }
                     @Override public void onPermissionRequired() { }
@@ -408,12 +423,13 @@ final class AppUpdater {
         }, "ashke-update-resume").start();
     }
 
-    private static void savePending(Context context, File apk, UpdateInfo update) {
+    private static void savePending(Context context, File apk, String sha, String cert,
+            long version) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putString(PENDING_PATH, apk.getAbsolutePath())
-                .putString(PENDING_SHA, update.sha256)
-                .putString(PENDING_CERT, update.certificateSha256)
-                .putLong(PENDING_VERSION, update.versionCode)
+                .putString(PENDING_SHA, sha)
+                .putString(PENDING_CERT, cert)
+                .putLong(PENDING_VERSION, version)
                 .apply();
     }
 
