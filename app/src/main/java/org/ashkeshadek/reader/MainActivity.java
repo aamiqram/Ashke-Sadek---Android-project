@@ -425,7 +425,7 @@ public class MainActivity extends Activity {
                 }
             }
             reader.endObject();
-            if (!foundSongs || songs.size() != 615) {
+            if (!foundSongs || songs.size() != 585) {
                 throw new IllegalStateException("Catalogue song count mismatch: " + songs.size());
             }
             return true;
@@ -734,7 +734,7 @@ public class MainActivity extends Activity {
             info.setPadding(dp(12), 0, 0, 0);
             info.addView(label(volumeNames.get(v - 1), 16, TEXT, true));
             addSpace(info, 3);
-            int count = catalogReady ? countInVolume(v) : new int[]{0, 82, 289, 244}[v];
+            int count = catalogReady ? countInVolume(v) : new int[]{0, 82, 285, 218}[v];
             info.addView(label(count + "টি গান", 12, MUTED, false));
             volumeCard.addView(info, new LinearLayout.LayoutParams(0, -2, 1f));
             volumeCard.addView(label("›", 26, GREEN, true));
@@ -1536,7 +1536,7 @@ public class MainActivity extends Activity {
         if (firstBatch < matches.size()) addMoreResults(target, matches, firstBatch);
     }
 
-    /** Reuses a compact catalogue index instead of normalizing all 615 lyric corpora per keystroke. */
+    /** Reuses a compact catalogue index instead of normalizing all 585 lyric corpora per keystroke. */
     private void buildSearchIndex() {
         searchIndex.clear();
         for (Song song : songs) {
@@ -2960,7 +2960,7 @@ public class MainActivity extends Activity {
 
     /**
      * One search pass after the user pauses briefly, rather than rebuilding
-     * transient Bengali/phonetic search forms for all 615 songs on every key.
+     * transient Bengali/phonetic search forms for all 585 songs on every key.
      */
     private TextWatcher watcher(TextChangeListener callback) {
         return new TextWatcher() {
@@ -3044,7 +3044,7 @@ public class MainActivity extends Activity {
         // The app never downloads or stores media. Any temporary cache is disposable and capped at 1 MiB.
         File cache = getCacheDir();
         if (directorySize(cache) > CACHE_BUDGET_BYTES) deleteDirectoryContents(cache);
-        // Keep only known catalogue IDs in saved lists; each list is naturally limited to 615 songs.
+        // Keep only known catalogue IDs in saved lists; each list is naturally limited to 585 songs.
         normalizeSavedSet("favorites");
         normalizeSavedSet("bookmarks");
     }

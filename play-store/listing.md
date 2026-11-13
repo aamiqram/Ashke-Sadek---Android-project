@@ -10,17 +10,17 @@ are fallback/alternative.
 
 ## Short description (≤80 chars)
 **Bengali (primary):**
-> ৬১৫টি শাহছুফি গানের সম্পূর্ণ সংকলন — ইন্টারনেট ছাড়াই, কণ্ঠ দিয়েও খুঁজুন
+> ৫৮৫টি শাহছুফি গানের সংকলন — ইন্টারনেট ছাড়াই, কণ্ঠ দিয়েও খুঁজুন
 
 **English (alternative):**
-> Complete collection of 615 Shahsufi songs — fully offline, searchable by voice
+> Offline collection of 585 Shahsufi songs — fully offline, searchable by voice
 
 ## Full description
 
 **Bengali (primary):**
 
 বাংলা গানের সম্পূর্ণ অফলাইন সংকলন। এশকে ছাদেক অ্যাপে পাবেন শাহছুফি ভাণ্ডারী
-সাহেবের ৬১৫টি গান — তিন খণ্ডে সাজানো, মূল বইয়ের সাজ অক্ষুণ্ণ রেখে।
+সাহেবের ৫৮৫টি গান — তিন খণ্ডে সাজানো, মূল বইয়ের সাজ অক্ষুণ্ণ রেখে।
 
 কেন এই অ্যাপ:
 • ইন্টারনেট ছাড়াই সব গান পড়া যায় — একবার ইনস্টল করলেই বইটি ফোনেই থাকে
@@ -38,7 +38,7 @@ are fallback/alternative.
 
 **English (alternative):**
 
-The complete offline Bengali songbook. এশকে ছাদেক carries all 615 songs of
+The complete offline Bengali songbook. এশকে ছাদেক carries all 585 songs of
 Shahsufi Bhandari across three volumes, keeping the layout of the printed book.
 
 • Fully offline — install once, the whole book lives on your phone

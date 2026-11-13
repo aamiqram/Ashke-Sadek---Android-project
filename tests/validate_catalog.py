@@ -21,14 +21,22 @@ MANIFEST = ROOT / "app/src/main/AndroidManifest.xml"
 
 payload = json.loads(gzip.decompress(CATALOG.read_bytes()).decode("utf-8"))
 songs = payload["songs"]
-expected = {1: 82, 2: 289, 3: 244}
-assert len(songs) == 615, f"Expected 615 songs, got {len(songs)}"
-assert len({song["id"] for song in songs}) == 615, "Song IDs are not unique"
+# Duplicates removed per the book's list plus a strict deep scan; printed
+# numbers keep their gaps (removed numbers are absent, never renumbered).
+expected = {1: 82, 2: 285, 3: 218}
+book_totals = {1: 82, 2: 289, 3: 244}
+total = sum(expected.values())
+assert len(songs) == total, f"Expected {total} songs, got {len(songs)}"
+assert len({song["id"] for song in songs}) == total, "Song IDs are not unique"
+removed = {int(volume): set(numbers)
+           for volume, numbers in payload["duplicateExclusions"]["removed"].items()}
 
 for volume, count in expected.items():
     rows = [song for song in songs if song["volume"] == volume]
     assert len(rows) == count, f"Volume {volume}: expected {count}, got {len(rows)}"
-    assert [song["number"] for song in rows] == list(range(1, count + 1)), f"Volume {volume}: numbering gap"
+    expected_numbers = [n for n in range(1, book_totals[volume] + 1)
+                        if n not in removed.get(volume, set())]
+    assert ([song["number"] for song in rows] == expected_numbers), f"Volume {volume}: numbering gap mismatch"
     for song in rows:
         assert song["id"] == f"{volume}-{song['number']}"
         assert song["title"].strip(), f"Missing title: {song['id']}"
@@ -137,7 +145,7 @@ assert voice_services[0].attrib.get(android + "foregroundServiceType") == "micro
 for xml_path in [ROOT / "app/src/main/res/values/styles.xml", ROOT / "app/src/main/res/drawable/ic_book.xml"]:
     ET.parse(xml_path)
 
-print("PASS: 615 songs, all volume sequences, titles, lyrics, Android manifest, and XML resources.")
+print(f"PASS: {total} songs, all volume sequences, titles, lyrics, Android manifest, and XML resources.")
 print(f"Catalogue: {CATALOG.stat().st_size:,} compressed bytes; {len(all_blocks):,} Word paragraphs")
 print(f"Word emphasis sidecar: {EMPHASIS.stat().st_size:,} compressed bytes; "
       f"{sum(bool(row) for row in emphasis):,} paragraphs with preserved bold spans")

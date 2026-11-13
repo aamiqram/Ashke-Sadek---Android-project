@@ -8,7 +8,7 @@ the same character n-gram sketch + verification algorithm over the real
 catalogue and measures, under simulated garbling:
 
   1. Recall          — how often the true song passes the fuzzy gate+verify.
-  2. Rank quality    — the true song position among all 615 fuzzy candidates.
+  2. Rank quality    — the true song position among all 585 fuzzy candidates.
   3. False positives — how often unrelated "conversation" blobs pass.
 
 Thresholds live next to the Java constants; this script does not change app
@@ -227,7 +227,7 @@ def main():
         fp_blob_records.append(passing)
 
     thresholds = (0.30, 0.35, 0.40, 0.45, 0.50)
-    print("Voice-fuzzy calibration — 615 songs, seeded run")
+    print("Voice-fuzzy calibration — 585 songs, seeded run")
     print(f"sketchGate={VOICE_FUZZY_SKETCH_GATE} "
           f"window={VOICE_FUZZY_QUERY_LIMIT}")
     print(f"{'':>14}" + "".join(f"{t:>8.2f}" for t in thresholds)
@@ -257,7 +257,7 @@ def main():
           f"sketch-level candidates per blob max={worst} "
           f"avg={sum(len(p) for p in fp_blob_records) / len(fp_blob_records):.2f}")
     print(f"verify-level candidates per blob total={fp_above} "
-          f"({fp_above / len(fp_blob_records):.2f} avg, out of 615 candidates)")
+          f"({fp_above / len(fp_blob_records):.2f} avg, out of 585 candidates)")
     print("\nfalse-positive sweep over verify thresholds:")
     for t in thresholds:
         n = sum(1 for p in fp_blob_records for _, ratio in p if ratio >= t)
