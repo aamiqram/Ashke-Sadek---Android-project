@@ -23,7 +23,7 @@ payload = json.loads(gzip.decompress(CATALOG.read_bytes()).decode("utf-8"))
 songs = payload["songs"]
 # Duplicates removed per the book's list plus a strict deep scan; printed
 # numbers keep their gaps (removed numbers are absent, never renumbered).
-expected = {1: 82, 2: 285, 3: 218}
+expected = {1: 82, 2: 285, 3: 216}
 book_totals = {1: 82, 2: 289, 3: 244}
 total = sum(expected.values())
 assert len(songs) == total, f"Expected {total} songs, got {len(songs)}"

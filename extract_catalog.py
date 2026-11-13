@@ -26,19 +26,21 @@ ROOT = Path(__file__).resolve().parent
 # (same line count, folded per-line similarity); a later edit to either Word
 # document that breaks a twin fails the build instead of silently shipping a
 # broken removal.
-# Deliberately kept: 3-121 (the book's report held it back for human review)
-# and 3-47, 3-96, 3-122, 3-138, 3-153, 3-224, 2-103 (below the strict bar).
-EXPECTED_TOTAL = 585
-EXPECTED_KEPT = {1: 82, 2: 285, 3: 218}
+# Deliberately kept: 3-47, 3-96, 3-122, 3-138, 3-153, 2-103 (below the strict
+# bar). 3-121 and 3-224 were initially held back under that bar, then removed
+# on the publisher's explicit decision (the book's own list calls both
+# duplicates of their keep partners); see _RELAXED_TWIN_BARS for 3-224.
+EXPECTED_TOTAL = 583
+EXPECTED_KEPT = {1: 82, 2: 285, 3: 216}
 BOOK_TOTALS = {1: 82, 2: 289, 3: 244}
 DUPLICATE_REMOVALS = {
     2: {180: (2, 5), 181: (2, 6), 191: (2, 7), 196: (2, 8)},
     3: {8: (2, 43), 43: (2, 190), 44: (2, 198), 45: (2, 200), 46: (2, 201),
         48: (2, 204), 50: (2, 212), 51: (2, 220), 52: (2, 224), 53: (2, 225),
         59: (2, 102), 61: (2, 114), 89: (2, 44), 106: (2, 54), 107: (3, 15),
-        116: (3, 16), 141: (3, 31), 146: (3, 30), 148: (3, 32), 167: (3, 37),
-        180: (3, 38), 181: (2, 82), 183: (3, 39), 184: (3, 40), 185: (2, 83),
-        222: (3, 41)},
+        116: (3, 16), 121: (3, 19), 141: (3, 31), 146: (3, 30), 148: (3, 32),
+        167: (3, 37), 180: (3, 38), 181: (2, 82), 183: (3, 39), 184: (3, 40),
+        185: (2, 83), 222: (3, 41), 224: (2, 84)},
 }
 
 # Copyist spelling variants seen across the book; used only to verify that a
@@ -58,10 +60,19 @@ def _fold(text: str) -> str:
     return re.sub(r"[^\u0980-\u09FF0-9]", "", text)
 
 
+# Publisher-decided removals with a slightly relaxed twin bar. 3-224 is the
+# same 8-line song as 2-84 but its last four lines carry the roughest copyist
+# drift of the whole set (min line 0.829, avg 0.937); the book's own
+# duplicate list flagged this row at 88%. The bar is relaxed only enough to
+# admit that measured drift - any content rewrite still fails the build.
+_RELAXED_TWIN_BARS = {"3-224": (0.78, 0.92)}
+
+
 def verify_removed_twins(removed_lyrics: dict, songs_by_id: dict) -> None:
     """Every removed song must remain a near-identical twin of its kept
     partner: same line count, per-line folded similarity min >= 0.85 and
-    average >= 0.95 (the strict bar the removal decision was made against)."""
+    average >= 0.95 (see _RELAXED_TWIN_BARS for the publisher-approved
+    exceptions)."""
     for volume, drops in DUPLICATE_REMOVALS.items():
         for number, (keep_volume, keep_number) in sorted(drops.items()):
             dropped_text = removed_lyrics.get((volume, number))
@@ -79,7 +90,9 @@ def verify_removed_twins(removed_lyrics: dict, songs_by_id: dict) -> None:
                     f"({len(kept_lines)})")
             ratios = [SequenceMatcher(None, _fold(a), _fold(b), autojunk=False).ratio()
                       for a, b in zip(dropped_lines, kept_lines)]
-            if min(ratios) < 0.85 or sum(ratios) / len(ratios) < 0.95:
+            min_bar, avg_bar = _RELAXED_TWIN_BARS.get(f"{volume}-{number}",
+                                                      (0.85, 0.95))
+            if min(ratios) < min_bar or sum(ratios) / len(ratios) < avg_bar:
                 raise RuntimeError(
                     f"Twin no longer near-identical: {volume}-{number} vs "
                     f"{keep_volume}-{keep_number} (min={min(ratios):.3f} "

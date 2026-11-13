@@ -4,7 +4,7 @@ An offline-first Bengali songbook reader for the complete three-volume collectio
 
 [![Build Android APK](https://github.com/aamiqram/Ashke-Sadek---Android-project/actions/workflows/build-apk.yml/badge.svg?branch=main)](https://github.com/aamiqram/Ashke-Sadek---Android-project/actions/workflows/build-apk.yml)
 
-**585 songs · 3 volumes · Android 5.0+ · Bengali interface**
+**583 songs · 3 volumes · Android 5.0+ · Bengali interface**
 
 Minimum Android version is 5.0 (API 21); the app targets API 36 and is packaged for ARM phones. x86 emulator libraries are excluded.
 
@@ -58,7 +58,7 @@ Voice suggestions are always checked against the actual song text. Strict matchi
 
 ## Catalogue and reading layout
 
-The bundled catalogue contains **585 songs**: 82 in the first volume, 285 in the second and 218 in the third. It preserves all 5,990 source Word lyric paragraphs of the kept songs. Lyrics and paragraph formatting are read from the original Word document; the corrected copy supplies song titles and index order. The catalogue-generation script reads both documents and never edits either one. 30 verified duplicate songs (later copies of an earlier song) are excluded from the catalogue while printed song numbers keep their gaps, so the app stays cross-referenceable with the print edition.
+The bundled catalogue contains **583 songs**: 82 in the first volume, 285 in the second and 216 in the third. It preserves all 5,973 source Word lyric paragraphs of the kept songs. Lyrics and paragraph formatting are read from the original Word document; the corrected copy supplies song titles and index order. The catalogue-generation script reads both documents and never edits either one. 32 verified duplicate songs (later copies of an earlier song) are excluded from the catalogue while printed song numbers keep their gaps, so the app stays cross-referenceable with the print edition.
 
 The reader maps Word alignment, indents and paragraph spacing to a fixed-width book column on typical phones, then scrolls through songs continuously. On narrower screens, the text scales to fit the available page. The source document mostly uses the SutonnyOMJ font, which is not bundled in the app; Android uses its Bengali system font instead. This makes line wrapping more consistent across common phone widths, but line breaks can still differ from Word or PDF and between Android system fonts. Readers can adjust text size inside the app.
 
