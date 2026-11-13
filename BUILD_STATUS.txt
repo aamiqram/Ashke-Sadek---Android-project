@@ -465,3 +465,46 @@ build 1.1.54-local/1054):
 Release: this push consumes run #55 (build); dispatching it runs #56 ->
 v1.1.56-beta / versionCode 1056 - carrying the MIUI-safe installer and
 the update notification together.
+
+
+Phase 2e - fast, stall-proof update download (local build 1.1.57-local):
+
+- The reported pain: in-app update downloads took 1-2 hours on the Redmi
+  Note 4, a few minutes on a low-end Android 11 Samsung, and were fine
+  on an Android 11 Vivo. The downloader was a single TCP stream with no
+  resume and no progress - on routes that throttle per connection
+  (typical shared broadband) 46 MB crawls at 15-25 KB/s, and a stalled
+  socket sat silently for up to 2 minutes before dying, after which the
+  whole file restarted from zero.
+- New transport: the APK is downloaded with 4 parallel HTTP range
+  connections; a one-byte range probe picks segmented or single-stream
+  mode per host. Each slice retries up to 3 times and resumes from the
+  bytes already on disk; connect timeout 15 s and read timeout 30 s turn
+  silent stalls into quick retries instead of multi-minute hangs. Parts
+  persist across app restarts, with a .total marker that discards stale
+  parts when the target release changes (a failed slice's own part is
+  dropped so the retry refetches it). The per-slice cap and the 250 MiB
+  cap are enforced; the SHA-256 + signer verification after download is
+  unchanged and remains the final integrity gate.
+- Second route: the publish workflow now force-pushes the APK beside
+  update.json on the update-mirror orphan branch, so the updater can
+  fetch from raw.githubusercontent.com (a different CDN route) and fall
+  back to the GitHub release asset. The mirror URL is derived in-app
+  from the verified release URL's own filename (never from untrusted
+  metadata), and valid parts carry over between routes since the byte
+  layout is identical.
+- Progress: a shade notification (এশকে ছাদেক আপডেট - ডাউনলোড হচ্ছে… 34%)
+  updates every 2 s while the download runs; it is ongoing during the
+  download and cleared on completion or failure. When notifications are
+  switched off, single-stream mode still toasts every 4 MB.
+- Protocol validated against the live release CDN (2026-11-13): the
+  range probe answers 206 with the correct Content-Range total, and a
+  4-way parallel reassembly of v1.1.56-beta's 46,210,175-byte APK
+  matches its published SHA-256. The mirrored APK for already-published
+  releases correctly 404s (exercising the asset fallback); the next
+  published release carries the mirrored copy.
+- Stale release notes in update.json (v1.1.44-era text) were refreshed
+  to describe the current download/notification/installer behaviour.
+
+Release: this push consumes run #57 (build); dispatching it runs #58 ->
+v1.1.58-beta / versionCode 1058.

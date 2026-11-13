@@ -1,6 +1,9 @@
 package org.ashkeshadek.reader;
 
 import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
@@ -29,7 +32,13 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
@@ -60,6 +69,12 @@ final class AppUpdater {
     private static final String PENDING_CERT = "pending_cert";
     private static final String PENDING_VERSION = "pending_version";
     private static final long MAX_APK_BYTES = 250L * 1024L * 1024L;
+    /** Parallel range connections for the APK download. */
+    private static final int DOWNLOAD_SEGMENTS = 4;
+    /** Below this size a single stream is simply faster than segmenting. */
+    private static final long MIN_SEGMENTS_BYTES = 8L * 1024L * 1024L;
+    private static final int SEGMENT_RETRIES = 3;
+    private static final int DOWNLOAD_NOTIFICATION_ID = 4154;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static Context appContext;
     private static SSLSocketFactory updaterSslFactory;
@@ -579,29 +594,258 @@ final class AppUpdater {
         return updaterSslFactory;
     }
 
+    /**
+     * APK download with two routes and stall-proof transport. The publish
+     * workflow force-pushes the APK beside update.json on the raw CDN
+     * mirror branch, so a slow route to one CDN can be traded for the
+     * other; either source is acceptable because the bytes are SHA-256
+     * verified before use. When the host honours HTTP ranges the file is
+     * pulled with a few parallel connections - a per-connection throttle
+     * on shared broadband stretched the single-stream download to hours
+     * on some devices - and every stalled or dropped connection resumes
+     * from where it stopped instead of restarting the whole file.
+     * Progress rides a shade notification as a percentage.
+     */
     private static void downloadApk(String url, File destination) throws Exception {
         if (!url.startsWith(RELEASE_ASSET_PREFIX)) {
-            throw new IllegalStateException("অনুমোদিত GitHub release URL ছাড়া APK ডাউনলোড করা যাবে না।");
+            throw new IllegalStateException(
+                    "\u0985\u09a8\u09c1\u09ae\u09cb\u09a6\u09bf\u09a4 GitHub release URL \u099b\u09be\u09dc\u09be APK \u09a1\u09be\u0989\u09a8\u09b2\u09cb\u09a1 \u0995\u09b0\u09be \u09af\u09be\u09ac\u09c7 \u09a8\u09be\u0964");
         }
-        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
-        connection.setConnectTimeout(20000);
-        connection.setReadTimeout(120000);
-        connection.setInstanceFollowRedirects(true);
-        connection.setRequestProperty("User-Agent", "AshkeShadek-Android-Updater/1.0");
-        if (connection instanceof HttpsURLConnection && appContext != null) {
-            ((HttpsURLConnection) connection).setSSLSocketFactory(trustedSslFactory());
+        String mirror = mirrorApkUrl(url);
+        String[] urls = mirror == null ? new String[]{url} : new String[]{mirror, url};
+        Exception failure = null;
+        for (String candidate : urls) {
+            try {
+                Log.i(TAG, "Downloading the APK from " + candidate);
+                segmentedDownload(candidate, destination);
+                return;
+            } catch (Exception error) {
+                Log.i(TAG, "Download from " + candidate + " failed: " + error);
+                destination.delete();
+                clearDownloadNotification();
+                failure = error;
+            }
         }
+        throw failure;
+    }
+
+    /** Same-named copy of the release APK on the raw CDN mirror branch. */
+    private static String mirrorApkUrl(String apkUrl) {
+        String afterPrefix = apkUrl.substring(RELEASE_ASSET_PREFIX.length());
+        int repoEnd = afterPrefix.indexOf('/');
+        String file = afterPrefix.substring(afterPrefix.lastIndexOf('/') + 1);
+        if (repoEnd <= 0 || file.isEmpty()) return null;
+        String repo = afterPrefix.substring(0, repoEnd);
+        return "https://raw.githubusercontent.com/" + repo + "/update-mirror/" + file;
+    }
+
+    private static void segmentedDownload(String url, File destination) throws Exception {
+        long total = probeSize(url);
+        if (total > MAX_APK_BYTES) {
+            throw new IllegalStateException(
+                    "APK \u09ab\u09be\u0987\u09b2\u099f\u09bf \u0985\u09a8\u09c1\u09ae\u09cb\u09a6\u09bf\u09a4 \u0986\u0995\u09be\u09b0\u09c7\u09b0 \u099a\u09c7\u09df\u09c7 \u09ac\u09dc\u0964");
+        }
+        if (total >= MIN_SEGMENTS_BYTES) {
+            segmentedRangeDownload(url, destination, total);
+        } else {
+            plainDownload(url, destination);
+        }
+    }
+
+    /** Content length via a one-byte range probe; -1 when ranges are unsupported. */
+    private static long probeSize(String url) throws Exception {
+        HttpURLConnection connection = open(url);
+        try {
+            connection.setRequestProperty("Range", "bytes=0-0");
+            int response = connection.getResponseCode();
+            if (response != 206) return -1;
+            String range = connection.getHeaderField("Content-Range");
+            if (range == null) return -1;
+            int slash = range.lastIndexOf('/');
+            if (slash < 0) return -1;
+            try {
+                return Long.parseLong(range.substring(slash + 1).trim());
+            } catch (NumberFormatException malformed) {
+                return -1;
+            }
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static void segmentedRangeDownload(String url, File destination, long total)
+            throws Exception {
+        File directory = destination.getParentFile();
+        File marker = new File(directory, destination.getName() + ".total");
+        long chunk = (total + DOWNLOAD_SEGMENTS - 1) / DOWNLOAD_SEGMENTS;
+        final File[] parts = new File[DOWNLOAD_SEGMENTS];
+        final long[] starts = new long[DOWNLOAD_SEGMENTS];
+        final long[] ends = new long[DOWNLOAD_SEGMENTS];
+        for (int i = 0; i < DOWNLOAD_SEGMENTS; i++) {
+            starts[i] = chunk * i;
+            ends[i] = i == DOWNLOAD_SEGMENTS - 1 ? total - 1 : chunk * (i + 1) - 1;
+            parts[i] = new File(directory, destination.getName() + ".part" + i);
+        }
+        // Parts of a previous attempt for a different release belong to
+        // another byte layout: drop them when the total changed, otherwise
+        // keep them so a restart resumes mid-file.
+        long previousTotal = -1;
+        if (marker.isFile()) {
+            try (InputStream input = new FileInputStream(marker);
+                 ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[32];
+                int count;
+                while ((count = input.read(buffer)) != -1) bytes.write(buffer, 0, count);
+                previousTotal = Long.parseLong(bytes.toString("UTF-8").trim());
+            } catch (Exception unreadable) {
+                previousTotal = -1;
+            }
+        }
+        if (previousTotal != total) {
+            for (File part : parts) part.delete();
+            try (OutputStream out = new FileOutputStream(marker)) {
+                out.write(String.valueOf(total).getBytes("UTF-8"));
+            }
+        }
+        postDownloadProgress(appContext, 0, true);
+
+        final AtomicBoolean running = new AtomicBoolean(true);
+        Thread watcher = new Thread(() -> {
+            while (running.get()) {
+                long have = 0;
+                for (File part : parts) have += part.length();
+                postDownloadProgress(appContext, (int) Math.min(99, 100L * have / total), false);
+                try {
+                    Thread.sleep(2000L);
+                } catch (InterruptedException interrupted) {
+                    return;
+                }
+            }
+        }, "ashke-update-progress");
+        watcher.start();
+        ExecutorService pool = Executors.newFixedThreadPool(DOWNLOAD_SEGMENTS);
+        try {
+            List<Future<Object>> downloads = new ArrayList<>();
+            for (int i = 0; i < DOWNLOAD_SEGMENTS; i++) {
+                final int index = i;
+                downloads.add(pool.submit(() -> {
+                    try {
+                        downloadSegment(url, starts[index], ends[index], parts[index]);
+                    } catch (Exception error) {
+                        // This part's bytes are untrusted; the next attempt
+                        // (or the other route) refetches it from scratch.
+                        parts[index].delete();
+                        throw error;
+                    }
+                    return null;
+                }));
+            }
+            for (Future<Object> download : downloads) {
+                try {
+                    download.get();
+                } catch (java.util.concurrent.ExecutionException execution) {
+                    Throwable cause = execution.getCause();
+                    throw cause instanceof Exception ? (Exception) cause : execution;
+                }
+            }
+            try (FileOutputStream output = new FileOutputStream(destination)) {
+                for (File part : parts) {
+                    try (InputStream input = new BufferedInputStream(new FileInputStream(part))) {
+                        byte[] buffer = new byte[128 * 1024];
+                        int count;
+                        while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+                    }
+                }
+                output.getFD().sync();
+            }
+            for (File part : parts) part.delete();
+            marker.delete();
+        } finally {
+            running.set(false);
+            watcher.interrupt();
+            pool.shutdownNow();
+            clearDownloadNotification();
+        }
+    }
+
+    /**
+     * One parallel slice, retried with range resume: a connection that
+     * stalls or drops continues from the bytes already on disk instead of
+     * restarting the whole file.
+     */
+    private static void downloadSegment(String url, long start, long end, File part)
+            throws Exception {
+        long expected = end - start + 1;
+        long written = part.isFile() ? part.length() : 0;
+        if (written > expected) {
+            part.delete();
+            written = 0;
+        }
+        for (int attempt = 1; ; attempt++) {
+            try {
+                HttpURLConnection connection = open(url);
+                connection.setRequestProperty("Range", "bytes=" + (start + written) + "-" + end);
+                try {
+                    int response = connection.getResponseCode();
+                    if (response != 206) {
+                        throw new IllegalStateException("HTTP " + response);
+                    }
+                    try (InputStream input = new BufferedInputStream(connection.getInputStream());
+                         FileOutputStream output = new FileOutputStream(part, true)) {
+                        byte[] buffer = new byte[128 * 1024];
+                        int count;
+                        while ((count = input.read(buffer)) != -1) {
+                            written += count;
+                            if (written > expected) {
+                                throw new IllegalStateException(
+                                        "APK \u0985\u0982\u09b6 \u09aa\u09cd\u09b0\u09a4\u09cd\u09af\u09be\u09b6\u09be\u09b0 \u099a\u09c7\u09df\u09c7 \u09ac\u09dc\u0964");
+                            }
+                            output.write(buffer, 0, count);
+                        }
+                    }
+                    if (written != expected) {
+                        throw new IllegalStateException(
+                                "\u09b8\u0982\u09af\u09cb\u0997 \u09ae\u09be\u099d\u09aa\u09a5\u09c7 \u09ac\u09bf\u099a\u09cd\u099b\u09bf\u09a8\u09cd\u09a8 \u09b9\u09df\u09c7\u099b\u09c7\u0964");
+                    }
+                    return;
+                } finally {
+                    connection.disconnect();
+                }
+            } catch (Exception error) {
+                if (attempt >= SEGMENT_RETRIES) throw error;
+                try {
+                    Thread.sleep(1500L * attempt);
+                } catch (InterruptedException interrupted) {
+                    throw interrupted;
+                }
+                written = part.isFile() ? part.length() : 0;
+                if (written > expected) {
+                    part.delete();
+                    written = 0;
+                }
+            }
+        }
+    }
+
+    /** Single-stream fallback for hosts without range support (or small files). */
+    private static void plainDownload(String url, File destination) throws Exception {
+        postDownloadProgress(appContext, 0, true);
+        HttpURLConnection connection = open(url);
         try {
             int response = connection.getResponseCode();
             if (response < 200 || response >= 300) {
-                throw new IllegalStateException("GitHub থেকে APK পাওয়া যায়নি (HTTP " + response + ")।");
+                throw new IllegalStateException(
+                        "GitHub \u09a5\u09c7\u0995\u09c7 APK \u09aa\u09be\u0993\u09df\u09be \u09af\u09be\u09df\u09a8\u09bf (HTTP " + response + ")\u0964");
             }
             // getContentLength() is available from Android 1.1; the 250 MiB
             // cap safely fits its signed 32-bit return value on minSdk 21.
             int declaredLength = connection.getContentLength();
             if (declaredLength > MAX_APK_BYTES) {
-                throw new IllegalStateException("APK ফাইলটি অনুমোদিত আকারের চেয়ে বড়।");
+                throw new IllegalStateException(
+                        "APK \u09ab\u09be\u0987\u09b2\u099f\u09bf \u0985\u09a8\u09c1\u09ae\u09cb\u09a6\u09bf\u09a4 \u0986\u0995\u09be\u09b0\u09c7\u09b0 \u099a\u09c7\u09df\u09c7 \u09ac\u09dc\u0964");
             }
+            long known = declaredLength > 0 ? declaredLength : 0;
+            long lastPosted = 0;
             try (InputStream input = new BufferedInputStream(connection.getInputStream());
                  FileOutputStream output = new FileOutputStream(destination)) {
                 byte[] buffer = new byte[64 * 1024];
@@ -609,13 +853,82 @@ final class AppUpdater {
                 int count;
                 while ((count = input.read(buffer)) != -1) {
                     total += count;
-                    if (total > MAX_APK_BYTES) throw new IllegalStateException("APK ফাইলটি অনুমোদিত আকারের চেয়ে বড়।");
+                    if (total > MAX_APK_BYTES) {
+                        throw new IllegalStateException(
+                                "APK \u09ab\u09be\u0987\u09b2\u099f\u09bf \u0985\u09a8\u09c1\u09ae\u09cb\u09a6\u09bf\u09a4 \u0986\u0995\u09be\u09b0\u09c7\u09b0 \u099a\u09c7\u09df\u09c7 \u09ac\u09dc\u0964");
+                    }
                     output.write(buffer, 0, count);
+                    if (known > 0 && total - lastPosted >= 4L * 1024L * 1024L) {
+                        lastPosted = total;
+                        postDownloadProgress(appContext, (int) (100L * total / known), false);
+                    }
                 }
                 output.getFD().sync();
             }
         } finally {
             connection.disconnect();
+        }
+    }
+
+    private static HttpURLConnection open(String url) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(30000);
+        connection.setInstanceFollowRedirects(true);
+        connection.setRequestProperty("User-Agent", "AshkeShadek-Android-Updater/1.0");
+        if (connection instanceof HttpsURLConnection && appContext != null) {
+            ((HttpsURLConnection) connection).setSSLSocketFactory(trustedSslFactory());
+        }
+        return connection;
+    }
+
+    /**
+     * Download progress as a shade notification: a user no longer stares at
+     * a silent toast wondering whether the download is stuck. Silent when
+     * the system has notifications off; toasts still report milestones.
+     */
+    private static void postDownloadProgress(Context context, int percent, boolean indeterminate) {
+        try {
+            if (context == null) return;
+            NotificationManager manager = (NotificationManager)
+                    context.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager == null) return;
+            if (Build.VERSION.SDK_INT >= 24 && !manager.areNotificationsEnabled()) return;
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel channel = new NotificationChannel(
+                        MainActivity.UPDATE_NOTIFICATION_CHANNEL, "\u0985\u09cd\u09af\u09be\u09aa \u0986\u09aa\u09a1\u09c7\u099f",
+                        NotificationManager.IMPORTANCE_DEFAULT);
+                channel.setDescription("\u09a8\u09a4\u09c1\u09a8 \u09b8\u0982\u09b8\u09cd\u0995\u09b0\u09a3\u09c7\u09b0 \u0998\u09cb\u09b7\u09a3\u09be");
+                manager.createNotificationChannel(channel);
+            }
+            Notification.Builder builder;
+            if (Build.VERSION.SDK_INT >= 26) {
+                builder = new Notification.Builder(context, MainActivity.UPDATE_NOTIFICATION_CHANNEL);
+            } else {
+                //noinspection deprecation
+                builder = new Notification.Builder(context);
+            }
+            String text = percent <= 0 || percent >= 100
+                    ? "\u09a8\u09a4\u09c1\u09a8 \u09b8\u0982\u09b8\u09cd\u0995\u09b0\u09a3 \u09a1\u09be\u0989\u09a8\u09b2\u09cb\u09a1 \u09b9\u099a\u09cd\u099b\u09c7\u2026"
+                    : "\u09a8\u09a4\u09c1\u09a8 \u09b8\u0982\u09b8\u09cd\u0995\u09b0\u09a3 \u09a1\u09be\u0989\u09a8\u09b2\u09cb\u09a1 \u09b9\u099a\u09cd\u099b\u09c7\u2026 " + percent + "%";
+            builder.setSmallIcon(R.drawable.ic_book)
+                    .setContentTitle("\u098f\u09b6\u0995\u09c7 \u099b\u09be\u09a6\u09c7\u0995 \u0986\u09aa\u09a1\u09c7\u099f")
+                    .setContentText(text)
+                    .setProgress(100, Math.max(0, Math.min(100, percent)), indeterminate)
+                    .setOngoing(true).setOnlyAlertOnce(true).setAutoCancel(false);
+            manager.notify(DOWNLOAD_NOTIFICATION_ID, builder.build());
+        } catch (Exception ignored) {
+            // A progress hint must never break the download itself.
+        }
+    }
+
+    private static void clearDownloadNotification() {
+        try {
+            if (appContext == null) return;
+            NotificationManager manager = (NotificationManager)
+                    appContext.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager != null) manager.cancel(DOWNLOAD_NOTIFICATION_ID);
+        } catch (Exception ignored) {
         }
     }
 

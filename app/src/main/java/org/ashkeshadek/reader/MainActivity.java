@@ -100,7 +100,7 @@ public class MainActivity extends Activity {
     private static final int REQUEST_EXPORT_USER_DATA = 512;
     private static final int REQUEST_IMPORT_USER_DATA = 513;
     /** Shade reminder posted whenever an auto-check detects a newer release. */
-    private static final String UPDATE_NOTIFICATION_CHANNEL = "ashke_app_updates";
+    static final String UPDATE_NOTIFICATION_CHANNEL = "ashke_app_updates";
     private static final int UPDATE_NOTIFICATION_ID = 4153;
     private static final int REQUEST_OPEN_UPDATE = 515;
     /** Carried by the update notification's tap intent. */
