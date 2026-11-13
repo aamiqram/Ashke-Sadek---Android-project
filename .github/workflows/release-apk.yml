@@ -80,15 +80,22 @@ jobs:
           fi
           printf '%s  %s\n' "$APK_SHA" "$APK_NAME" > SHA256SUMS.txt
           APK_URL="https://github.com/${GH_REPOSITORY}/releases/download/${TAG}/${APK_NAME}"
-          jq -n \
-            --argjson versionCode "$VERSION_CODE" \
-            --arg versionName "$VERSION_NAME" \
-            --arg apkUrl "$APK_URL" \
-            --arg sha256 "$APK_SHA" \
-            --arg certificateSha256 "$CERT_SHA" \
-            --arg releaseNotes "আপডেট ডাউনলোড এখন অনেক দ্রুত: একযোগে ০পাইটি সংযোগে ভাগ করে নামানো হয়, সংযোগ বাধা পেলে যেখানে থেমেছিল সেখান থেকেই পুনরায় চেষ্টা হয়, আর বিজ্ঞপ্তিতে শতকরা হার দেখা যায়। GitHub-এর পাশাপাশি raw CDN মিরর থেকেও APK নামানোর পথ যোগ হয়েছে — ধীর রুট হলে অন্যটি ব্যবহৃত হয়। নতুন সংস্করণ পেলে বিজ্ঞপ্তি আসে; ট্যাপ করলেই ডাউনলোড ও ইনস্টলের নিশ্চিতকরণ খোলে। Android ৫-৭ (MIUI সহ)-এ ইনস্টল এখন Android-এর নিজস্ব ইনস্টলারের মাধ্যমে হয় — ইনস্টলের সময় যে নিশ্চিতকরণ চাওয়া হয় সেটি চাপ দিলেই হবে।"
-            '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,certificateSha256:$certificateSha256,releaseNotes:$releaseNotes}' \
-            > update.json
+          RELEASE_NOTES="আপডেট ডাউনলোড এখন অনেক দ্রুত: একযোগে ৪টি সংযোগে ভাগ করে নামানো হয়, সংযোগ বাধা পেলে যেখানে থেমেছিল সেখান থেকেই পুনরায় চেষ্টা হয়, আর বিজ্ঞপ্তিতে শতকরা হার দেখা যায়। GitHub-এর পাশাপাশি raw CDN মিরর থেকেও APK নামানোর পথ যোগ হয়েছে — ধীর রুট হলে অন্যটি ব্যবহৃত হয়। নতুন সংস্করণ পেলে বিজ্ঞপ্তি আসে; ট্যাপ করলেই ডাউনলোড ও ইনস্টলের নিশ্চিতকরণ খোলে। Android ৫-৭ (MIUI সহ)-এ ইনস্টল এখন Android-এর নিজস্ব ইনস্টলারের মাধ্যমে হয় — ইনস্টলের সময় যে নিশ্চিতকরণ চাওয়া হয় সেটি চাপ দিলেই হবে।"
+          export RELEASE_NOTES
+          python3 - "$VERSION_CODE" "$VERSION_NAME" "$APK_URL" "$APK_SHA" "$CERT_SHA" "$PWD/update.json" <<'PY'
+          import json, os, sys
+          vc, vn, url, sha, cert, out = sys.argv[1:7]
+          with open(out, "w", encoding="utf-8") as f:
+              json.dump({
+                  "versionCode": int(vc),
+                  "versionName": vn,
+                  "apkUrl": url,
+                  "sha256": sha,
+                  "certificateSha256": cert,
+                  "releaseNotes": os.environ["RELEASE_NOTES"],
+              }, f, ensure_ascii=False)
+              f.write("\n")
+          PY
           cat > release-notes.md <<EOF
           ## এশকে ছাদেক Android — ${VERSION_NAME}
 
