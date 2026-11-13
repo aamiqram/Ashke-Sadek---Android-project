@@ -3,8 +3,32 @@
     android:height="48dp"
     android:viewportWidth="48"
     android:viewportHeight="48">
-    <path android:fillColor="#1D4C3D" android:pathData="M8,7.5C8,5.6 9.6,4 11.5,4H36v35H11.5C9.6,39 8,40.6 8,42.5V7.5Z" />
-    <path android:fillColor="#F7F5EF" android:pathData="M13,9h18v2H13zM13,15h18v2H13zM13,21h14v2H13zM13,27h18v2H13z" />
-    <path android:fillColor="#D5B77B" android:pathData="M34,4h3v35h-3z" />
-    <path android:fillColor="#28634F" android:pathData="M11.5,39H37v4H11.5C9.6,43 8,41.4 8,39.5S9.6,36 11.5,36V39Z" />
+    <!-- Deep ice-teal rounded plate (launcher icon, all Android 5+). -->
+    <path android:fillColor="#1D4C3D" android:pathData="M8,2 H40 Q46,2 46,8 V40 Q46,46 40,46 H8 Q2,46 2,40 V8 Q2,2 8,2 Z" />
+    <!-- Frost sheen over the upper half. -->
+    <path android:fillColor="#0FFFFFFF" android:pathData="M4.2,24 V9.2 Q4.2,4.2 9.2,4.2 H38.8 Q43.8,4.2 43.8,9.2 V24 Z" />
+    <!-- Inner frost ring. -->
+    <path android:strokeColor="#26FFFFFF" android:strokeWidth="1" android:pathData="M8.6,4.4 H39.4 Q43.6,4.4 43.6,8.6 V39.4 Q43.6,43.6 39.4,43.6 H8.6 Q4.4,43.6 4.4,39.4 V8.6 Q4.4,4.4 8.6,4.4 Z" />
+    <!-- Open songbook pages. -->
+    <path android:fillColor="#F7F5EF" android:pathData="M24,25 L7,21.5 L7,37 L24,40.5 Z" />
+    <path android:fillColor="#F7F5EF" android:pathData="M24,25 L41,21.5 L41,37 L24,40.5 Z" />
+    <!-- Page lines. -->
+    <path android:fillColor="#C2D4C8" android:pathData="M10,23.4 L21,25.7 L21,27.1 L10,24.8 Z" />
+    <path android:fillColor="#C2D4C8" android:pathData="M10,27.4 L21,29.7 L21,31.1 L10,28.8 Z" />
+    <path android:fillColor="#C2D4C8" android:pathData="M10,31.4 L21,33.7 L21,35.1 L10,32.8 Z" />
+    <path android:fillColor="#C2D4C8" android:pathData="M38,23.4 L27,25.7 L27,27.1 L38,24.8 Z" />
+    <path android:fillColor="#C2D4C8" android:pathData="M38,27.4 L27,29.7 L27,31.1 L38,28.8 Z" />
+    <path android:fillColor="#C2D4C8" android:pathData="M38,31.4 L27,33.7 L27,35.1 L38,32.8 Z" />
+    <!-- Spine. -->
+    <path android:fillColor="#16382E" android:pathData="M23.2,24.7 H24.8 V40.5 H23.2 Z" />
+    <!-- Crescent. -->
+    <path android:fillColor="#FFFFFF" android:pathData="M19,7 A5,5 0 1 0 19,17 A6.5,6.5 0 0 1 19,7 Z" />
+    <!-- Shrine dome with finial. -->
+    <path android:fillColor="#FFFFFF" android:pathData="M29.5,13.5 C29.5,9.6 31.2,7.4 33.5,7.4 C35.8,7.4 37.5,9.6 37.5,13.5 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M28.8,13.9 H38.2 V15.1 H28.8 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M33.5,4.2 L34.4,5.4 L33.5,6.6 L32.6,5.4 Z" />
+    <!-- Frost sparkles. -->
+    <path android:fillColor="#CFE3D8" android:pathData="M24.5,4.6 L25.1,5.9 L26.4,6.5 L25.1,7.1 L24.5,8.4 L23.9,7.1 L22.6,6.5 L23.9,5.9 Z" />
+    <path android:fillColor="#CFE3D8" android:pathData="M41.5,15.8 L42.1,17.1 L43.2,17.7 L42.1,18.3 L41.5,19.6 L40.9,18.3 L39.8,17.7 L40.9,17.1 Z" />
+    <path android:fillColor="#CFE3D8" android:pathData="M8.5,13.9 L9.1,15.1 L10.1,15.7 L9.1,16.3 L8.5,17.5 L7.9,16.3 L6.9,15.7 L7.9,15.1 Z" />
 </vector>

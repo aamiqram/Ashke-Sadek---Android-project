@@ -655,6 +655,25 @@ public class MainActivity extends Activity {
         addSpace(hero, 6);
         hero.addView(heroSub);
         body.addView(hero, matchWrap());
+        addSpace(body, 9);
+
+        LinearLayout bookCard = cardRow();
+        ImageView bookLogo = new ImageView(this);
+        bookLogo.setImageResource(R.drawable.ic_book);
+        bookCard.addView(bookLogo, new LinearLayout.LayoutParams(dp(42), dp(42)));
+        LinearLayout bookInfo = new LinearLayout(this);
+        bookInfo.setOrientation(LinearLayout.VERTICAL);
+        bookInfo.setPadding(dp(12), 0, 0, 0);
+        bookInfo.addView(label("বই ও লেখক", 15, TEXT, true));
+        addSpace(bookInfo, 3);
+        bookInfo.addView(label("প্রচ্ছদ ও লেখক পরিচিতি", 11, MUTED, false));
+        bookCard.addView(bookInfo, new LinearLayout.LayoutParams(0, -2, 1f));
+        bookCard.addView(label("›", 24, GREEN, true));
+        bookCard.setOnClickListener(v -> {
+            homeHasInteracted = true;
+            renderCover();
+        });
+        body.addView(bookCard, matchWrap());
         addSpace(body, 18);
 
         if (!catalogReady) {
@@ -816,6 +835,173 @@ public class MainActivity extends Activity {
         feedbackCard.addView(label("›", 24, GREEN, true));
         feedbackCard.setOnClickListener(v -> renderFeedbackForm());
         body.addView(feedbackCard, matchWrap());
+    }
+
+    /**
+     * Cover page: the print title page rebuilt in the app's frosty style.
+     * Every line below is the real title-page text of the Word master
+     * (paragraphs 1-12 of the source document).
+     */
+    private void renderCover() {
+        currentScreen = "cover";
+        homeHasInteracted = true;
+        mount("বইয়ের প্রচ্ছদ", "এশকে ছাদেক — ভান্ডারী গানের বই", true, true);
+        ScrollView scroll = pageScroll();
+        LinearLayout body = (LinearLayout) scroll.getChildAt(0);
+        body.setPadding(dp(20), dp(14), dp(20), dp(26));
+        body.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        GradientDrawable plate = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR, new int[]{0xFF2A6E57, 0xFF113830});
+        plate.setCornerRadius(dp(26));
+        LinearLayout cover = new LinearLayout(this);
+        cover.setOrientation(LinearLayout.VERTICAL);
+        cover.setGravity(Gravity.CENTER_HORIZONTAL);
+        cover.setBackground(plate);
+        cover.setElevation(dp(4));
+        cover.setPadding(dp(22), dp(28), dp(22), dp(28));
+
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.ic_book);
+        logo.setContentDescription("এশকে ছাদেক");
+        cover.addView(logo, new LinearLayout.LayoutParams(dp(72), dp(72)));
+        addSpace(cover, 14);
+        TextView kicker = label("আপনার গানের বই", 12, 0xFF9FC3B0, true);
+        kicker.setGravity(Gravity.CENTER);
+        cover.addView(kicker, matchWrap());
+        addSpace(cover, 6);
+        TextView title = label("এশকে ছাদেক", 34, 0xFFFFFFFF, true);
+        title.setGravity(Gravity.CENTER);
+        cover.addView(title, matchWrap());
+        addSpace(cover, 6);
+        TextView subtitle = label("(ভান্ডারী গানের বই)", 15, 0xFFCFE3D8, false);
+        subtitle.setGravity(Gravity.CENTER);
+        cover.addView(subtitle, matchWrap());
+        addSpace(cover, 12);
+        TextView volumes = label("১ম খণ্ড  ·  ২য় খণ্ড  ·  ৩য় খণ্ড", 13, 0xFFE0EAE3, false);
+        volumes.setGravity(Gravity.CENTER);
+        cover.addView(volumes, matchWrap());
+        addSpace(cover, 18);
+
+        View rule = new View(this);
+        rule.setBackgroundColor(0x33FFFFFF);
+        cover.addView(rule, new LinearLayout.LayoutParams(dp(56), dp(1)));
+        addSpace(cover, 16);
+
+        TextView writerKicker = label("রচয়ীতা", 12, 0xFF9FC3B0, true);
+        writerKicker.setGravity(Gravity.CENTER);
+        cover.addView(writerKicker, matchWrap());
+        addSpace(cover, 6);
+        TextView writer = label("শাহছুফি ছৈয়দ হযরত মৌলানা আহমদ উল্লাহ আল মাইজভাণ্ডারী আল পোমরাবী (কঃ)",
+                15, 0xFFFFFFFF, true);
+        writer.setGravity(Gravity.CENTER);
+        cover.addView(writer, matchWrap());
+        addSpace(cover, 10);
+        TextView darbar = label("গাউছিয়া আহমদিয়া পোমরা দরবার শরীফ", 13, 0xFFCFE3D8, false);
+        darbar.setGravity(Gravity.CENTER);
+        cover.addView(darbar, matchWrap());
+        addSpace(cover, 4);
+        TextView address = label("পোমরা, রাঙ্গুনিয়া, চট্টগ্রাম", 11, 0xFF9FC3B0, false);
+        address.setGravity(Gravity.CENTER);
+        cover.addView(address, matchWrap());
+        body.addView(cover, matchWrap());
+        addSpace(body, 16);
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        TextView about = navButton("লেখক সম্পর্কে");
+        TextView read = navButton("গান পড়ুন");
+        about.setOnClickListener(v -> renderAboutWriter());
+        read.setOnClickListener(v -> {
+            if (catalogReady) renderIndex();
+            else Toast.makeText(this, "গানের তালিকা প্রস্তুত হচ্ছে…", Toast.LENGTH_SHORT).show();
+        });
+        LinearLayout.LayoutParams aboutParams = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        LinearLayout.LayoutParams readParams = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        readParams.leftMargin = dp(10);
+        actions.addView(about, aboutParams);
+        actions.addView(read, readParams);
+        body.addView(actions, matchWrap());
+    }
+
+    /**
+     * About-the-writer: verified facts from the book's title page plus the
+     * Bhandari-gaan tradition note. Biography details (birth, bai'at,
+     * khilafat, wafat) are added here once the publisher confirms them.
+     */
+    private void renderAboutWriter() {
+        currentScreen = "about";
+        homeHasInteracted = true;
+        mount("লেখক সম্পর্কে", "রচয়ীতা — ভান্ডারী গানের বই", true, true);
+        ScrollView scroll = pageScroll();
+        LinearLayout body = (LinearLayout) scroll.getChildAt(0);
+        body.setPadding(dp(18), dp(12), dp(18), dp(26));
+
+        GradientDrawable plate = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR, new int[]{0xFF2A6E57, 0xFF113830});
+        plate.setCornerRadius(dp(22));
+        LinearLayout hero = new LinearLayout(this);
+        hero.setOrientation(LinearLayout.VERTICAL);
+        hero.setGravity(Gravity.CENTER_HORIZONTAL);
+        hero.setBackground(plate);
+        hero.setElevation(dp(3));
+        hero.setPadding(dp(20), dp(22), dp(20), dp(22));
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.ic_book);
+        logo.setContentDescription("এশকে ছাদেক");
+        hero.addView(logo, new LinearLayout.LayoutParams(dp(60), dp(60)));
+        addSpace(hero, 10);
+        TextView name = label("শাহছুফি ছৈয়দ হযরত মৌলানা আহমদ উল্লাহ আল মাইজভাণ্ডারী আল পোমরাবী (কঃ)",
+                17, 0xFFFFFFFF, true);
+        name.setGravity(Gravity.CENTER);
+        hero.addView(name, matchWrap());
+        addSpace(hero, 6);
+        TextView role = label("রচয়ীতা, এশকে ছাদেক — ১ম, ২য় ও ৩য় খণ্ড", 12, 0xFFCFE3D8, false);
+        role.setGravity(Gravity.CENTER);
+        hero.addView(role, matchWrap());
+        body.addView(hero, matchWrap());
+        addSpace(body, 14);
+
+        LinearLayout khanka = cardColumn();
+        khanka.setPadding(dp(16), dp(14), dp(16), dp(14));
+        khanka.addView(label("খানকা", 12, GREEN, true));
+        addSpace(khanka, 5);
+        khanka.addView(label("গাউছিয়া আহমদিয়া পোমরা দরবার শরীফ", 15, TEXT, true));
+        addSpace(khanka, 4);
+        khanka.addView(label("গ্রাম ও ডাকঘর: পোমরা · থানা: রাঙ্গুনিয়া · জেলা: চট্টগ্রাম, বাংলাদেশ", 12, MUTED, false));
+        body.addView(khanka, matchWrap());
+        addSpace(body, 10);
+
+        LinearLayout tradition = cardColumn();
+        tradition.setPadding(dp(16), dp(14), dp(16), dp(16));
+        tradition.addView(label("ভাণ্ডারী গানের ধারা", 12, GREEN, true));
+        addSpace(tradition, 5);
+        TextView traditionText = label("ভাণ্ডারী গান চট্টগ্রামের মাইজভাণ্ডারী তরিকার আধ্যাত্মিক সাধনার ভাষা। আল্লাহ-রাসূলের প্রেম, মুর্শিদের প্রতি আনুগত্য, অন্তরের আকুলতা ও আত্মসমর্পণ — এই গানগুলোর প্রাণ। দরবার শরীফের মাহফিল ও ওরশে শত শত বছর ধরে মুখে মুখে ফিরে আসা এই গানের সংকলনই এশকে ছাদেক।",
+                14, TEXT, false);
+        traditionText.setLineSpacing(dp(2), 1f);
+        tradition.addView(traditionText, matchWrap());
+        body.addView(tradition, matchWrap());
+        addSpace(body, 10);
+
+        LinearLayout collection = cardColumn();
+        collection.setPadding(dp(16), dp(14), dp(16), dp(14));
+        collection.addView(label("এই সংকলনে", 12, GREEN, true));
+        addSpace(collection, 5);
+        String counts = catalogReady
+                ? bn(songs.size()) + "টি গান — প্রথম খণ্ড " + bn(countInVolume(1))
+                    + ", দ্বিতীয় খণ্ড " + bn(countInVolume(2))
+                    + ", তৃতীয় খণ্ড " + bn(countInVolume(3))
+                : bn(583) + "টি গান — প্রথম খণ্ড " + bn(82)
+                    + ", দ্বিতীয় খণ্ড " + bn(285) + ", তৃতীয় খণ্ড " + bn(216);
+        collection.addView(label(counts, 14, TEXT, true));
+        addSpace(collection, 4);
+        collection.addView(label("ছাপা বইয়ের গান-নম্বর ও ক্রম অক্ষুণ্ণ রাখা হয়েছে, যাতে ছাপা বইয়ের সঙ্গে মিলিয়ে পড়া যায়।", 12, MUTED, false));
+        body.addView(collection, matchWrap());
+        addSpace(body, 14);
+
+        TextView seeCover = navButton("প্রচ্ছদটি দেখুন");
+        seeCover.setOnClickListener(v -> renderCover());
+        body.addView(seeCover, matchHeight(48));
     }
 
     private void renderFeedbackForm() {
@@ -1344,14 +1530,14 @@ public class MainActivity extends Activity {
             channel.setDescription("নতুন সংস্করণের ঘোষণা");
             manager.createNotificationChannel(channel);
             notification = new Notification.Builder(context, UPDATE_NOTIFICATION_CHANNEL)
-                    .setSmallIcon(R.drawable.ic_book).setColor(GREEN_DARK)
+                    .setSmallIcon(R.drawable.ic_book_glyph).setColor(GREEN_DARK)
                     .setContentTitle(title).setContentText(text)
                     .setContentIntent(content).setAutoCancel(true)
                     .setOnlyAlertOnce(true).build();
         } else {
             //noinspection deprecation
             notification = new Notification.Builder(context)
-                    .setSmallIcon(R.drawable.ic_book).setColor(GREEN_DARK)
+                    .setSmallIcon(R.drawable.ic_book_glyph).setColor(GREEN_DARK)
                     .setContentTitle(title).setContentText(text)
                     .setContentIntent(content).setAutoCancel(true)
                     .setOnlyAlertOnce(true).build();
@@ -2985,6 +3171,7 @@ public class MainActivity extends Activity {
             saveReaderPosition();
             if(currentSong!=null){int v=currentSong.volume;renderVolume(v);}else renderHome();
         }
+        else if(currentScreen.equals("about"))renderCover();
         else if(!currentScreen.equals("home"))renderHome();
         else super.onBackPressed();
     }

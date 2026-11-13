@@ -28,6 +28,7 @@ Minimum Android version is 5.0 (API 21); the app targets API 36 and is packaged 
 | Search | Get live typed results from song titles, first lines and lyrics. Search understands older/newer Bengali spellings, phonetic forms, partial words and limited typing errors. Long result lists load in batches. |
 | Voice | Tap the microphone once. The app begins listening automatically when its offline model is ready and shows likely songs while recognition continues. Suggestions include the volume, song number, title and a lyric excerpt. |
 | Read | Read the original Bengali text with paragraph alignment, indentation, emphasis and spacing preserved. Songs flow vertically in book order; use the small/big text controls to adjust the text. |
+| Book | Open the cover page carrying the print title page (title, three volumes, author, darbar sharif) and an about-the-writer screen from the home screen's "বই ও লেখক" card. |
 | Find another song | Open search from inside a song, without returning to the home screen. |
 | Personal library | Save favourites and bookmarks, see recent songs, and return to the last song and its saved scroll position. |
 | Backup and restore | Export or restore favourites, bookmarks, recent songs, last-read song and per-song reading positions as JSON. |
@@ -64,9 +65,9 @@ The reader maps Word alignment, indents and paragraph spacing to a fixed-width b
 
 Integrity reference values:
 
-- Original Word file SHA-256: `6fd0fdd333c62221b93610debd7272d9a0e39b3a492e22aa946ee4263a52f23e`
-- Corrected index copy SHA-256: `c349196b014dbedf600ac236c3362d90e215912c1e63c406a03c7430496749be`
-- Compressed catalogue: about 217 KB; expanded catalogue: about 2.35 MB
+- Original Word file SHA-256: `9a08ce75cf41052ed0b8929b8febab0a46f9e6b4021d504b45a2cf79ad2f6fe3`
+- Corrected index copy SHA-256: `8480af0447bcfd1b1816bdb339f7218482918b229ebdda4d568cabe161089d05`
+- Compressed catalogue: about 203 KB; expanded catalogue: about 2.14 MB
 
 ## Performance and memory
 

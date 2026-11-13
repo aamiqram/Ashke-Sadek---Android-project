@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- Alpha-only open-book silhouette: notification small icons are tinted
+         by the system, so a solid plate would render as a filled blob. -->
+    <path android:fillColor="#FFFFFFFF" android:pathData="M23.4,21.7 L7,18 L7,36 L23.4,39.7 Z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M24.6,21.7 L41,18 L41,36 L24.6,39.7 Z" />
+</vector>

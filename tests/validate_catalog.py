@@ -142,7 +142,10 @@ assert voice_services[0].attrib.get(android + "process") == ":voice"
 assert voice_services[0].attrib.get(android + "exported") == "false"
 assert voice_services[0].attrib.get(android + "foregroundServiceType") == "microphone"
 
-for xml_path in [ROOT / "app/src/main/res/values/styles.xml", ROOT / "app/src/main/res/drawable/ic_book.xml"]:
+for xml_path in [ROOT / "app/src/main/res/values/styles.xml",
+                 ROOT / "app/src/main/res/drawable/ic_book.xml",
+                 ROOT / "app/src/main/res/drawable/ic_book_glyph.xml",
+                 ROOT / "app/src/main/res/drawable-v24/ic_book.xml"]:
     ET.parse(xml_path)
 
 print(f"PASS: {total} songs, all volume sequences, titles, lyrics, Android manifest, and XML resources.")

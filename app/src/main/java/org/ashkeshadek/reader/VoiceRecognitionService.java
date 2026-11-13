@@ -178,7 +178,7 @@ public final class VoiceRecognitionService extends Service {
                 ? new android.app.Notification.Builder(this, FOREGROUND_CHANNEL_ID)
                 : new android.app.Notification.Builder(this);
         return builder
-                .setSmallIcon(R.drawable.ic_book)
+                .setSmallIcon(R.drawable.ic_book_glyph)
                 .setContentTitle(title)
                 .setContentText(text)
                 .setOngoing(true)

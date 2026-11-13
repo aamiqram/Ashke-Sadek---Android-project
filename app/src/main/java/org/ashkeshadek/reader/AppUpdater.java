@@ -927,7 +927,7 @@ final class AppUpdater {
             String text = percent <= 0 || percent >= 100
                     ? "\u09a8\u09a4\u09c1\u09a8 \u09b8\u0982\u09b8\u09cd\u0995\u09b0\u09a3 \u09a1\u09be\u0989\u09a8\u09b2\u09cb\u09a1 \u09b9\u099a\u09cd\u099b\u09c7\u2026"
                     : "\u09a8\u09a4\u09c1\u09a8 \u09b8\u0982\u09b8\u09cd\u0995\u09b0\u09a3 \u09a1\u09be\u0989\u09a8\u09b2\u09cb\u09a1 \u09b9\u099a\u09cd\u099b\u09c7\u2026 " + percent + "%";
-            builder.setSmallIcon(R.drawable.ic_book)
+            builder.setSmallIcon(R.drawable.ic_book_glyph)
                     .setContentTitle("\u098f\u09b6\u0995\u09c7 \u099b\u09be\u09a6\u09c7\u0995 \u0986\u09aa\u09a1\u09c7\u099f")
                     .setContentText(text)
                     .setProgress(100, Math.max(0, Math.min(100, percent)), indeterminate)
