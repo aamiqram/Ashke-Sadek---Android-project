@@ -508,3 +508,45 @@ Phase 2e - fast, stall-proof update download (local build 1.1.57-local):
 
 Release: this push consumes run #57 (build); dispatching it runs #58 ->
 v1.1.58-beta / versionCode 1058.
+
+---
+
+Catalogue fix: volume 1 song 5; 3-183 title investigation closed (Nov 13, 2026, this push):
+
+- Song 1-5 title and mukhda corrected at the source document:
+    "গলেতুইলাদে ফাঁসের বেড়াঁ"  ->  "গলেতুইলাদে ফাঁসের বেড়ী"
+  (chandrabindu vowel form replaced by the long ee-kar the book prints).
+  Evidence: printed book body page scan (300 dpi crop), the word-folder
+  PDF index page (rendered), and the corrected docx (TOC para 20 +
+  mukhda para 762). "Phanser" keeps its chandrabindu; later verses of
+  the same song already carried the long form.
+- Regenerated with --original = corrected docx and --index = a temp copy
+  of the same docx whose TOC entry 183 (para 571) was reverted to the
+  shipped title, so the two findings ship independently.
+- Full-catalogue diff vs the shipped data: only song 1-5 changed
+  (title, firstLine, mukhda lyric block). All other 614 songs are equal;
+  the ( ৫৫৪ )-numbering is untouched. Emphasis sidecar: 6,246 rows,
+  content-identical before and after. Counts stay 82/289/244, 615 songs.
+- hotwords.txt regenerated from the current catalogue (3,952 lines):
+  removes a 206-line drift where the old file still carried
+  pre-correction spellings the shipped catalogue had already fixed.
+  Hotword vocabulary now matches the shipped lyric text.
+- tests/validate_catalog.py PASS (615 songs; recorded source SHA-256s
+  match the verified originals); tests/validate_fonts.py PASS (all four
+  bundled fonts cover all 77 used Bengali codepoints).
+- 3-183 title kept as shipped ("আমার দেহ কালা করলাম রে-") even though the corrected
+  docx TOC row reads differently: that TOC entry is an orphan (it
+  matches no body first line; it is a near-duplicate of 3-186's real
+  title). The printed volume-3 index skips entries 183-185 and its
+  numbering drifts, so it cannot arbitrate. Print-body confirmation:
+  body page ৬৮ carries the ( ৫৫৪ ) marker (whole-book
+  numbering, offset 371 = vol-3 song 183) opening with the same
+  deho-kala first line the shipped title names. Titles pair with body
+  first lines, so entry 183 keeps the shipped title; the docx TOC row
+  is treated as a copyist slip.
+
+Release math after this push: push build runs are sequential, so this
+catalogue push consumed build run #58 (push builds never publish).
+The maintainer's workflow_dispatch build is run #59 -> v1.1.59-beta /
+versionCode 1059: first release carrying the segmented downloader,
+progress notification, mirrored APK AND the song 1-5 correction.
