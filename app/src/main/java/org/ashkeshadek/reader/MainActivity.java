@@ -115,33 +115,9 @@ public class MainActivity extends Activity {
             "অ্যাপে সমস্যা হচ্ছে", "অ্যাপ ধীর / আটকে যাচ্ছে", "গান খুঁজে পাচ্ছি না",
             "গানের লেখা বা সাজানো ভুল", "নতুন ফিচার বা উন্নতির পরামর্শ"
     };
-    private static final Pattern WORD_PATTERN =
-            Pattern.compile("[\\p{L}\\p{M}\\p{N}]+");
-    private static final Pattern NORMALIZE_SEPARATOR_PATTERN =
-            Pattern.compile("[\\p{Punct}\\p{Z}\\s\\u200c\\u200d]+");
-    private static final String[][] OLD_BENGALI_ALIASES = {
-            {"হইয়াছে", "হয়েছে"}, {"হইয়াছে", "হয়েছে"}, {"হইয়াছি", "হয়েছি"},
-            {"করিয়াছি", "করেছি"}, {"করিয়াছে", "করেছে"}, {"করিয়াছেন", "করেছেন"},
-            {"হইয়া", "হয়ে"}, {"হইয়ে", "হয়ে"}, {"হইলে", "হলে"},
-            {"হইতে", "হতে"}, {"হইবে", "হবে"}, {"হইল", "হল"},
-            {"করিয়া", "করে"}, {"করিতে", "করতে"}, {"করিতেছে", "করছে"},
-            {"করতেছে", "করছে"}, {"যাইতেছে", "যাচ্ছে"}, {"যাইয়া", "গিয়ে"},
-            {"দিয়া", "দিয়ে"}, {"লইয়া", "নিয়ে"}, {"পাইয়া", "পেয়ে"},
-            {"খাইয়া", "খেয়ে"}, {"বলিয়া", "বলে"}, {"দেখিয়া", "দেখে"},
-            {"তাহার", "তার"}, {"তাহাকে", "তাকে"}, {"যাহা", "যা"},
-            {"যাহার", "যার"}, {"যাহাতে", "যাতে"}, {"ইহা", "এটা"}
-    };
-    private static final Pattern[] OLD_BENGALI_ALIAS_PATTERNS = buildAliasPatterns();
-
-    private static Pattern[] buildAliasPatterns() {
-        Pattern[] patterns = new Pattern[OLD_BENGALI_ALIASES.length];
-        for (int i = 0; i < OLD_BENGALI_ALIASES.length; i++) {
-            patterns[i] = Pattern.compile("(?<![\\p{L}\\p{M}])"
-                    + Pattern.quote(OLD_BENGALI_ALIASES[i][0])
-                    + "(?![\\p{L}\\p{M}])");
-        }
-        return patterns;
-    }
+    // Text folding, the old-spelling alias bridge, the strict scorer and the
+    // voice alignment matcher live in VoiceMatchEngine (pure JDK) so the CI
+    // self-test can exercise the shipped matcher without an Android SDK.
 
     private final List<Song> songs = new ArrayList<>();
     private final java.util.Map<String, SearchDocument> searchIndex = new java.util.HashMap<>();
@@ -185,8 +161,22 @@ public class MainActivity extends Activity {
     private EditText searchBeforeDialog;
     private final java.util.Map<String, VoiceCandidate> voiceCandidateHistory =
             new java.util.HashMap<>();
-    private String pinnedVoiceCandidateId = "";
-    private int pinnedVoiceCandidateScore;
+    /** Voice ranking runs on a worker thread; the UI thread only applies
+     * finished results, so 583-song scoring never blocks recognition. */
+    private java.util.concurrent.ExecutorService voiceMatchExecutor;
+    /** Bumped per transcript and on session end; stale results are dropped. */
+    private final java.util.concurrent.atomic.AtomicLong voiceMatchSequence =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Latest ranked leader, used for the confident final-result auto-open. */
+    private String voiceLeaderId = "";
+    private int voiceLeaderScore;
+    private int voiceRunnerUpScore;
+    /** A leader with this much best-score evidence may be pinned. */
+    private static final int VOICE_PIN_CONFIRM_SCORE = 1000;
+    private static final int VOICE_PIN_MIN_OBSERVATIONS = 2;
+    /** Final-result auto-open: only a clear, strong leader opens directly. */
+    private static final int VOICE_AUTO_OPEN_SCORE = 1200;
+    private static final int VOICE_AUTO_OPEN_MARGIN = 150;
     private long lastVoiceCandidateUpdateMs;
     private String lastVoiceCandidateQuery = "";
     private boolean voiceSessionCompleted = false;
@@ -208,6 +198,11 @@ public class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        voiceMatchExecutor = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+            Thread thread = new Thread(r, "ashke-voice-match");
+            thread.setPriority(Thread.NORM_PRIORITY - 1);
+            return thread;
+        });
         launchStartedUptimeMs = SystemClock.uptimeMillis();
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         installCrashDiagnosticHandler();
@@ -1735,270 +1730,30 @@ public class MainActivity extends Activity {
     }
 
     private SearchQuery prepareSearchQuery(String value) {
-        String original = value == null ? "" : value;
-        LinkedHashSet<String> uniqueTerms = new LinkedHashSet<>();
-        Matcher matcher = WORD_PATTERN.matcher(original);
-        while (matcher.find()) {
-            String token = normalize(matcher.group());
-            if (token.length() >= 2) uniqueTerms.add(token);
-        }
-        List<SearchTerm> terms = new ArrayList<>(uniqueTerms.size());
-        for (String token : uniqueTerms) {
-            String modern = normalize(modernizeOldBengali(token));
-            terms.add(new SearchTerm(token, modern, phoneticNormalize(token)));
-        }
-        return new SearchQuery(normalize(original),
-                normalize(modernizeOldBengali(original)),
-                phoneticNormalize(original), terms);
+        return VoiceMatchEngine.prepareSearchQuery(value);
     }
 
     private int scoreSongMatch(Song song, SearchQuery query) {
-        return scoreSongMatch(song, query, false);
-    }
-
-    /**
-     * Shared catalogue matcher for typed and spoken input. Query variants are
-     * prepared once; the voice path applies stricter evidence rules so normal
-     * conversation and short ASR fragments do not produce confident song hits.
-     */
-    private int scoreSongMatch(Song song, SearchQuery query, boolean voiceInput) {
-        if (query.normalized.length() < (voiceInput ? 3 : 1)) return 0;
         SearchDocument doc = searchIndex.get(song.id);
-        if (doc == null) return 0;
-
-        // A short substring is not useful evidence: it creates many accidental
-        // matches while someone is speaking. Keep typed autocomplete permissive.
-        int phraseMinimum = voiceInput ? 5 : 3;
-        // A long single spoken word can still occur incidentally in a lyric.
-        // Require at least two distinct words before accepting phrase matches.
-        if (query.normalized.length() >= phraseMinimum
-                && (!voiceInput || query.terms.size() >= 2)) {
-            if (doc.title.contains(query.normalized)) return 2400 + query.normalized.length();
-            if (doc.normalized.contains(query.normalized)) return 1800 + query.normalized.length();
-            if (!query.modern.equals(query.normalized) && doc.modern.contains(query.modern))
-                return 1550 + query.modern.length();
-            if (query.phonetic.length() >= phraseMinimum && doc.phonetic.contains(query.phonetic))
-                return 1300 + query.phonetic.length();
-        }
-        if (query.terms.isEmpty()) return 0;
-        // Two isolated common words are weak evidence. Short queries can still
-        // qualify above when they form a contiguous lyric phrase.
-        if (voiceInput && query.terms.size() < 3) return 0;
-
-        int exact = 0, modern = 0, phonetic = 0, prefix = 0, fuzzy = 0;
-        for (SearchTerm term : query.terms) {
-            if (doc.words.contains(term.original)) exact++;
-            else if (doc.modernWords.contains(term.original)
-                    || doc.words.contains(term.modern)) modern++;
-            else if (doc.phoneticWords.contains(term.phonetic)) phonetic++;
-            else if (!voiceInput && term.original.length() >= 2
-                    && hasPrefixMatch(term.original, doc.words, doc.modernWords)) prefix++;
-            else if (!voiceInput && term.original.length() >= 4
-                    && hasOneEditMatch(term.original, doc.words)) fuzzy++;
-        }
-
-        int matched = exact + modern + phonetic + prefix + fuzzy;
-        if (matched == 0) return 0;
-        int coverage = matched * 100 / query.terms.size();
-
-        // Voice suggestions need corroboration from multiple recognized words.
-        // A single long phrase can still qualify through the phrase checks above.
-        int orderedMatches = 0;
-        if (voiceInput) {
-            int required = query.terms.size() == 1 ? 2
-                    : Math.max(2, (query.terms.size() * 60 + 99) / 100);
-            if (matched < required) return 0;
-
-            // Matching words anywhere in a long song is not enough. The words
-            // heard by the microphone should also occur in lyric order nearby.
-            orderedMatches = Math.max(
-                    countOrderedMatches(doc.normalized, query.terms, 0),
-                    Math.max(countOrderedMatches(doc.modern, query.terms, 1),
-                            countOrderedMatches(doc.phonetic, query.terms, 2)));
-            int requiredInOrder = Math.max(2, (query.terms.size() + 1) / 2);
-            if (orderedMatches < requiredInOrder) return 0;
-        } else if (query.terms.size() >= 3 && matched < 2) {
-            return 0;
-        }
-
-        int score = exact * 125 + modern * 105 + phonetic * 82
-                + prefix * 54 + fuzzy * 38 + coverage;
-        if (query.terms.size() >= 2 && matched == query.terms.size()) score += 100;
-        if (coverage == 100) score += 25;
-        if (voiceInput) score += orderedMatches * 35;
-        return score;
-    }
-
-    /**
-     * Counts how many recognized words occur in lyric order within a short
-     * character window. Uses existing normalized strings, avoiding a second
-     * per-song token list and its memory cost on low-RAM Android devices.
-     */
-    private int countOrderedMatches(String text, List<SearchTerm> terms, int form) {
-        int cursor = 0;
-        int matched = 0;
-        for (SearchTerm term : terms) {
-            String word = form == 1 ? term.modern
-                    : form == 2 ? term.phonetic : term.original;
-            int position = text.indexOf(word, cursor);
-            if (position < 0 || position - cursor > 80) continue;
-            matched++;
-            cursor = position + word.length();
-        }
-        return matched;
-    }
-
-    /**
-     * Sung audio garbles words, so the strict word/ordered matcher often rejects
-     * the real song. This fallback scores character n-gram overlap between the
-     * whole transcript and the lyrics. A small sampled sketch keeps the per-song
-     * scan cheap; exact verification runs only for songs whose sketch looks
-     * promising. Calibration: tests/calibrate_voice_fuzzy.py.
-     */
-    private static final int VOICE_GRAM_SIZE = 3;
-    private static final int VOICE_GRAM_SKETCH_LIMIT = 256;
-    /** Sketch recall gate, as a fraction of the lyric grams expected to match. */
-    private static final double VOICE_FUZZY_SKETCH_GATE = 0.40;
-    /**
-     * Exact containment ratio a song must reach before it may be suggested.
-     * Calibration (tests/calibrate_voice_fuzzy.py, seeded over the real
-     * catalogue): 0.40 keeps 96–98% of lightly garbled sung transcripts and
-     * about 35% of heavily garbled ones in the top suggestions, against only
-     * ~0.13 stray conversation candidates per chatter window.
-     */
-    private static final double VOICE_FUZZY_VERIFY_RATIO = 0.40;
-    /** Transcripts keep growing; only the tail window drives the fuzzy score. */
-    private static final int VOICE_FUZZY_QUERY_LIMIT = 260;
-
-    private int scoreVoiceFuzzyMatch(SearchDocument doc, SearchQuery query) {
-        String original = fuzzyVoiceWindow(query.normalized);
-        String modern = fuzzyVoiceWindow(query.modern);
-        int grams = original.length() - VOICE_GRAM_SIZE + 1;
-        if (doc.gramSketch.length == 0 || grams < 10) return 0;
-        double sampleFraction = doc.gramSketch.length / (double) doc.gramCount;
-        int sketchGate = Math.max(2, (int) Math.ceil(
-                sampleFraction * grams * VOICE_FUZZY_SKETCH_GATE));
-        int sketchHits = countGramsInSketch(original, doc.gramSketch);
-        if (sketchHits < sketchGate) return 0;
-        int verified = Math.max(
-                countGramsInText(original, doc.normalized),
-                countGramsInText(modern, doc.modern));
-        double ratio = verified / (double) grams;
-        if (ratio < VOICE_FUZZY_VERIFY_RATIO) return 0;
-        return (int) (420 + ratio * 500);
-    }
-
-    private String fuzzyVoiceWindow(String text) {
-        if (text.length() <= VOICE_FUZZY_QUERY_LIMIT) return text;
-        return text.substring(text.length() - VOICE_FUZZY_QUERY_LIMIT);
-    }
-
-    private static long[] buildGramSketch(String normalized) {
-        int count = normalized.length() - VOICE_GRAM_SIZE + 1;
-        if (count <= 0) return new long[0];
-        int keep = Math.min(count, VOICE_GRAM_SKETCH_LIMIT);
-        long[] sketch = new long[keep];
-        for (int i = 0; i < keep; i++) {
-            int start = (int) ((long) i * count / keep);
-            sketch[i] = gramHash(normalized, start, start + VOICE_GRAM_SIZE);
-        }
-        java.util.Arrays.sort(sketch);
-        return sketch;
-    }
-
-    private static long gramHash(String text, int start, int end) {
-        long hash = 0xcbf29ce484222325L;
-        for (int i = start; i < end; i++) {
-            hash ^= text.charAt(i);
-            hash *= 0x100000001b3L;
-        }
-        return hash;
-    }
-
-    private static boolean sketchContains(long[] sketch, long hash) {
-        int low = 0, high = sketch.length - 1;
-        while (low <= high) {
-            int mid = (low + high) >>> 1;
-            long value = sketch[mid];
-            if (value == hash) return true;
-            if (value < hash) low = mid + 1; else high = mid - 1;
-        }
-        return false;
-    }
-
-    private static int countGramsInSketch(String query, long[] sketch) {
-        int count = query.length() - VOICE_GRAM_SIZE + 1;
-        if (count <= 0) return 0;
-        int hits = 0;
-        for (int i = 0; i < count; i++) {
-            if (sketchContains(sketch, gramHash(query, i, i + VOICE_GRAM_SIZE))) hits++;
-        }
-        return hits;
-    }
-
-    private static int countGramsInText(String query, String text) {
-        int count = query.length() - VOICE_GRAM_SIZE + 1;
-        if (count <= 0) return 0;
-        int hits = 0;
-        for (int i = 0; i < count; i++) {
-            if (text.indexOf(query.substring(i, i + VOICE_GRAM_SIZE)) >= 0) hits++;
-        }
-        return hits;
-    }
-
-    private boolean hasPrefixMatch(String query, Set<String> original, Set<String> modern) {
-        for (String word : original) if (word.startsWith(query)) return true;
-        for (String word : modern) if (word.startsWith(query)) return true;
-        return false;
+        return doc == null ? 0
+                : VoiceMatchEngine.scoreSongMatch(song, doc, query, false);
     }
 
     /** Search-only spelling bridge; displayed lyrics always remain in the original text. */
     private String modernizeOldBengali(String value) {
-        String result = Normalizer.normalize(value == null ? "" : value, Normalizer.Form.NFC);
-        for (int i = 0; i < OLD_BENGALI_ALIASES.length; i++) {
-            Matcher matcher = OLD_BENGALI_ALIAS_PATTERNS[i].matcher(result);
-            result = matcher.replaceAll(Matcher.quoteReplacement(OLD_BENGALI_ALIASES[i][1]));
-        }
-        return result;
+        return VoiceMatchEngine.modernizeOldBengali(value);
     }
 
     private String phoneticNormalize(String value) {
-        String result = normalize(value);
-        return result.replace("শ", "স").replace("ষ", "স").replace("ণ", "ন")
-                .replace("ী", "ি").replace("ঈ", "ই").replace("ূ", "ু")
-                .replace("ঊ", "উ").replace("ৎ", "ত");
+        return VoiceMatchEngine.phoneticNormalize(value);
     }
 
     private Set<String> searchWords(String value) {
-        Set<String> words = new HashSet<>();
-        if (value == null) return words;
-        Matcher matcher = WORD_PATTERN.matcher(value);
-        while (matcher.find()) {
-            String word = normalize(matcher.group());
-            if (word.length() >= 2) words.add(word);
-        }
-        return words;
+        return VoiceMatchEngine.searchWords(value);
     }
 
-    private boolean hasOneEditMatch(String query, Set<String> candidates) {
-        for (String candidate : candidates) {
-            if (Math.abs(candidate.length() - query.length()) > 1 || candidate.length() < 3) continue;
-            if (oneEditAway(query, candidate)) return true;
-        }
-        return false;
-    }
-
-    private boolean oneEditAway(String first, String second) {
-        int i = 0, j = 0, edits = 0;
-        while (i < first.length() && j < second.length()) {
-            if (first.charAt(i) == second.charAt(j)) { i++; j++; continue; }
-            if (++edits > 1) return false;
-            if (first.length() > second.length()) i++;
-            else if (second.length() > first.length()) j++;
-            else { i++; j++; }
-        }
-        if (i < first.length() || j < second.length()) edits++;
-        return edits <= 1;
+    private String normalize(String value) {
+        return VoiceMatchEngine.normalize(value);
     }
 
     private void addSongRows(LinearLayout parent, List<Song> list) {
@@ -2511,8 +2266,10 @@ public class MainActivity extends Activity {
         voiceListeningStarted = false;
         voiceCandidateSelected = false;
         voiceCandidateHistory.clear();
-        pinnedVoiceCandidateId = "";
-        pinnedVoiceCandidateScore = 0;
+        voiceMatchSequence.incrementAndGet();
+        voiceLeaderId = "";
+        voiceLeaderScore = 0;
+        voiceRunnerUpScore = 0;
         lastVoiceCandidateQuery = "";
         lastVoiceCandidateUpdateMs = 0L;
         voiceSessionStartedUptimeMs = SystemClock.uptimeMillis();
@@ -2711,6 +2468,7 @@ public class MainActivity extends Activity {
 
     private void finishVoiceDialog() {
         voiceSessionCompleted = true;
+        voiceMatchSequence.incrementAndGet();
         if (voiceDialog != null) {
             AlertDialog old = voiceDialog;
             voiceDialog = null;
@@ -2726,6 +2484,7 @@ public class MainActivity extends Activity {
 
     private void cancelVoiceSession() {
         voiceSessionCompleted = true;
+        voiceMatchSequence.incrementAndGet();
         if (voiceServiceStarted) {
             sendVoiceServiceCommand(VoiceRecognitionService.ACTION_CANCEL);
         }
@@ -2816,7 +2575,12 @@ public class MainActivity extends Activity {
         voiceModelServiceActive = false;
     }
 
-    /** Shows the strongest three live catalogue candidates while recognition continues. */
+        /**
+     * Shows the strongest three live catalogue candidates while recognition
+     * continues. Scoring (583-song strict pass, sketch prefilter and the
+     * alignment stage) runs on a worker thread; the UI thread only applies
+     * finished results, so the transcript preview never fights the decoder.
+     */
     private void renderVoiceCandidates(String transcript) {
         if (voiceCandidates == null) return;
         String query = transcript == null ? "" : transcript.trim();
@@ -2832,51 +2596,89 @@ public class MainActivity extends Activity {
         if (now - lastVoiceCandidateUpdateMs < 180L) return;
         lastVoiceCandidateQuery = query;
         lastVoiceCandidateUpdateMs = now;
-        SearchQuery preparedQuery = prepareSearchQuery(query);
-        for (Song song : songs) {
-            int score = scoreSongMatch(song, preparedQuery, true);
-            // Strict word evidence can vanish entirely when singing garbles the
-            // recognized words. The fuzzy fallback keeps voice suggestions alive
-            // for such transcripts; typed search never runs it.
-            boolean strictEvidence = score >= 300;
-            if (!strictEvidence) {
-                SearchDocument doc = searchIndex.get(song.id);
-                if (doc != null) score = scoreVoiceFuzzyMatch(doc, preparedQuery);
+        final long sequence = voiceMatchSequence.incrementAndGet();
+        final List<Song> snapshot = new ArrayList<>(songs);
+        final String transcriptForEngine = query;
+        voiceMatchExecutor.execute(() -> {
+            VoiceMatchEngine.MatchResult result;
+            try {
+                result = VoiceMatchEngine.compute(snapshot, searchIndex,
+                        transcriptForEngine);
+            } catch (Throwable failure) {
+                Log.w("AshkeShadekVoice", "Voice candidate scoring failed", failure);
+                return;
             }
-            if (score >= 300) {
-                VoiceCandidate candidate = voiceCandidateHistory.get(song.id);
-                if (candidate == null) {
-                    candidate = new VoiceCandidate(song);
-                    voiceCandidateHistory.put(song.id, candidate);
-                }
-                if (!query.equals(candidate.lastObservedQuery)) {
-                    candidate.observations++;
-                    candidate.lastObservedQuery = query;
-                }
-                if (score >= candidate.bestScore) {
-                    candidate.bestScore = score;
-                    // Word-based excerpts only mean something for strict
-                    // matches; fuzzy matches keep the previous excerpt.
-                    if (strictEvidence) {
-                        candidate.excerpt = matchingLyricExcerpt(song, preparedQuery);
-                    }
-                }
-                if (pinnedVoiceCandidateId.isEmpty()
-                        || (song.id.equals(pinnedVoiceCandidateId)
-                        && candidate.bestScore >= pinnedVoiceCandidateScore)
-                        || (candidate.observations >= 2
-                        && candidate.bestScore >= pinnedVoiceCandidateScore + 100)) {
-                    pinnedVoiceCandidateId = song.id;
-                    pinnedVoiceCandidateScore = candidate.bestScore;
+            if (sequence != voiceMatchSequence.get()) return;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                applyVoiceMatchResult(sequence, result);
+            });
+        });
+    }
+
+    /** Applies engine results to the session history, then re-renders rows. */
+    private void applyVoiceMatchResult(long sequence,
+            VoiceMatchEngine.MatchResult result) {
+        if (voiceCandidates == null || voiceCandidateSelected
+                || voiceSessionCompleted) return;
+        if (sequence != voiceMatchSequence.get()) return;
+        for (VoiceMatchEngine.Candidate candidate : result.candidates) {
+            VoiceCandidate known = voiceCandidateHistory.get(candidate.song.id);
+            if (known == null) {
+                known = new VoiceCandidate(candidate.song);
+                voiceCandidateHistory.put(candidate.song.id, known);
+            }
+            if (!result.transcript.equals(known.lastObservedQuery)) {
+                known.observations++;
+                known.lastObservedQuery = result.transcript;
+            }
+            known.lastFinalScore = candidate.finalScore;
+            if (candidate.finalScore >= known.bestScore) {
+                known.bestScore = candidate.finalScore;
+                // Word-based excerpts only mean something for strict matches;
+                // alignment matches keep the previous excerpt.
+                if (candidate.strictScore >= 300) {
+                    known.excerpt = matchingLyricExcerpt(candidate.song,
+                            result.query);
                 }
             }
         }
+        // Track the leader for the confident final-result auto-open.
+        if (!result.candidates.isEmpty()) {
+            voiceLeaderId = result.candidates.get(0).song.id;
+            voiceLeaderScore = result.candidates.get(0).finalScore;
+            voiceRunnerUpScore = result.candidates.size() > 1
+                    ? result.candidates.get(1).finalScore : 0;
+        }
+        renderVoiceCandidateRows();
+    }
+
+    /**
+     * Ranking: the current final score leads; the session best only fills
+     * ties. A leader with repeated strong evidence is pinned so the top row
+     * does not flicker while the reader keeps singing.
+     */
+    private void renderVoiceCandidateRows() {
+        String computedPin = "";
+        if (!voiceLeaderId.isEmpty()) {
+            VoiceCandidate leader = voiceCandidateHistory.get(voiceLeaderId);
+            if (leader != null
+                    && leader.bestScore >= VOICE_PIN_CONFIRM_SCORE
+                    && leader.observations >= VOICE_PIN_MIN_OBSERVATIONS) {
+                computedPin = leader.song.id;
+            }
+        }
+        final String pinId = computedPin;
         List<VoiceCandidate> matches = new ArrayList<>(voiceCandidateHistory.values());
         Collections.sort(matches, (x, y) -> {
-            if (x.song.id.equals(pinnedVoiceCandidateId)) return -1;
-            if (y.song.id.equals(pinnedVoiceCandidateId)) return 1;
-            int byScore = Integer.compare(y.bestScore, x.bestScore);
-            if (byScore != 0) return byScore;
+            if (!pinId.isEmpty()) {
+                if (x.song.id.equals(pinId)) return -1;
+                if (y.song.id.equals(pinId)) return 1;
+            }
+            int byCurrent = Integer.compare(y.lastFinalScore, x.lastFinalScore);
+            if (byCurrent != 0) return byCurrent;
+            int byBest = Integer.compare(y.bestScore, x.bestScore);
+            if (byBest != 0) return byBest;
             if (x.song.volume != y.song.volume) return Integer.compare(x.song.volume, y.song.volume);
             return Integer.compare(x.song.number, y.song.number);
         });
@@ -2918,7 +2720,7 @@ public class MainActivity extends Activity {
             String normalized = normalize(text);
             String modern = normalize(modernizeOldBengali(text));
             int matches = 0;
-            for (SearchTerm term : query.terms) {
+            for (SearchQuery.SearchTerm term : query.terms) {
                 if (normalized.contains(term.original) || modern.contains(term.original)
                         || normalized.contains(term.modern) || modern.contains(term.modern)) {
                     matches++;
@@ -2944,6 +2746,15 @@ public class MainActivity extends Activity {
         Song direct = resolveDirectJump(phrase, currentSong != null ? currentSong.volume : 0);
         if (direct != null) {
             openSong(direct);
+            return;
+        }
+        // The live list already led somewhere by a wide margin: finishing
+        // the session opens it instead of dropping the alignment result.
+        Song voiceLeader = byId(voiceLeaderId);
+        if (voiceLeader != null
+                && voiceLeaderScore >= VOICE_AUTO_OPEN_SCORE
+                && voiceLeaderScore >= voiceRunnerUpScore + VOICE_AUTO_OPEN_MARGIN) {
+            openSong(voiceLeader);
             return;
         }
         if (target != null) {
@@ -3035,17 +2846,6 @@ public class MainActivity extends Activity {
     }
     private String joinRecent(List<String> ids){StringBuilder b=new StringBuilder();for(String id:ids){if(b.length()>0)b.append(',');b.append(id);}return b.toString();}
     private List<String> parseRecent(String saved){List<String> out=new ArrayList<>();if(saved!=null&&!saved.isEmpty()){for(String id:saved.split(",")){if(!id.trim().isEmpty()&&!out.contains(id.trim()))out.add(id.trim());if(out.size()>=12)break;}}return out;}
-
-    private String normalize(String value){
-        if(value==null)return "";
-        String s=Normalizer.normalize(value,Normalizer.Form.NFC).toLowerCase(Locale.ROOT).trim();
-        s=s.replace("য়","য়").replace("ড়","ড়")
-                .replace("ঢ়","ড়").replace("ঢ়","ড়")
-                .replace("ৰ","র").replace("ৱ","ও")
-                .replace("়","").replace("ৎ","ত");
-        s=NORMALIZE_SEPARATOR_PATTERN.matcher(s).replaceAll("");
-        return s;
-    }
 
     private Song byId(String id){for(Song s:songs)if(s.id.equals(id))return s;return null;}
     private Song byPosition(int volume,int number){for(Song s:songs)if(s.volume==volume&&s.number==number)return s;return null;}
@@ -3310,87 +3110,8 @@ public class MainActivity extends Activity {
         deleteDirectoryContents(getCacheDir());
     }
 
-    @Override protected void onDestroy(){stopOfflineVoiceService();super.onDestroy();}
+    @Override protected void onDestroy(){stopOfflineVoiceService();
+            if (voiceMatchExecutor != null) voiceMatchExecutor.shutdownNow();
+            super.onDestroy();}
 
-    private static class SearchQuery {
-        final String normalized, modern, phonetic;
-        final List<SearchTerm> terms;
-        SearchQuery(String normalized, String modern, String phonetic, List<SearchTerm> terms) {
-            this.normalized = normalized; this.modern = modern;
-            this.phonetic = phonetic; this.terms = terms;
-        }
-    }
-
-    /** Per-token forms are calculated once per keystroke/transcript, not per song. */
-    private static class SearchTerm {
-        final String original, modern, phonetic;
-        SearchTerm(String original, String modern, String phonetic) {
-            this.original = original;
-            this.modern = modern;
-            this.phonetic = phonetic;
-        }
-    }
-
-    private static class SearchDocument {
-        final String normalized, modern, phonetic, title;
-        final Set<String> words, modernWords, phoneticWords = new HashSet<>();
-        /** Evenly sampled character n-gram hashes of the normalized lyrics. */
-        final long[] gramSketch;
-        /** Total character n-gram count the sketch was sampled from. */
-        final int gramCount;
-        SearchDocument(String normalized, String modern, String phonetic, String title,
-                       Set<String> words, Set<String> modernWords) {
-            this.normalized = normalized; this.modern = modern; this.phonetic = phonetic;
-            this.title = title; this.words = words; this.modernWords = modernWords;
-            for (String word : words) phoneticWords.add(phoneticizeWord(word));
-            for (String word : modernWords) phoneticWords.add(phoneticizeWord(word));
-            this.gramCount = Math.max(0, normalized.length() - VOICE_GRAM_SIZE + 1);
-            this.gramSketch = buildGramSketch(normalized);
-        }
-    }
-
-    private static class VoiceCandidate {
-        final Song song;
-        int bestScore;
-        int observations;
-        String lastObservedQuery = "";
-        String excerpt;
-
-        VoiceCandidate(Song song) {
-            this.song = song;
-            this.excerpt = song.firstLine();
-        }
-    }
-    private static String phoneticizeWord(String value) {
-        return value.replace("শ", "স").replace("ষ", "স").replace("ণ", "ন")
-                .replace("ী", "ি").replace("ঈ", "ই").replace("ূ", "ু")
-                .replace("ঊ", "উ").replace("ৎ", "ত");
-    }
-
-    private static class Song {
-        final String id; final int volume; final int number; final String title; final String lyrics;
-        final String category; final List<LyricBlock> lyricBlocks;
-        Song(String id,int volume,int number,String title,String lyrics,String category,List<LyricBlock> lyricBlocks){
-            this.id=id; this.volume=volume; this.number=number; this.title=title; this.lyrics=lyrics;
-            this.category=category; this.lyricBlocks=lyricBlocks;
-        }
-        String firstLine() {
-            int lineEnd = lyrics.indexOf('\n');
-            return lineEnd < 0 ? lyrics : lyrics.substring(0, lineEnd);
-        }
-    }
-
-    private static class LyricBlock {
-        final int startOffset; final int endOffset; final int alignment;
-        final float leftIndentPt; final float firstLineIndentPt; final float rightIndentPt;
-        final float spaceBeforePt; final float spaceAfterPt;
-        List<int[]> boldSpans;
-        LyricBlock(int startOffset,int endOffset,int alignment,float leftIndentPt,float firstLineIndentPt,
-                   float rightIndentPt,float spaceBeforePt,float spaceAfterPt){
-            this.startOffset=startOffset; this.endOffset=endOffset; this.alignment=alignment;
-            this.leftIndentPt=leftIndentPt; this.firstLineIndentPt=firstLineIndentPt;
-            this.rightIndentPt=rightIndentPt; this.spaceBeforePt=spaceBeforePt; this.spaceAfterPt=spaceAfterPt;
-        }
-        int length() { return endOffset - startOffset; }
-    }
 }
