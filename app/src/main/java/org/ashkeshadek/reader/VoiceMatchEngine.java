@@ -265,10 +265,12 @@ final class VoiceMatchEngine {
     /**
      * Alignment admission threshold. Calibration on the real catalogue
      * (tests/calibrate_voice_fuzzy.py): ordinary-speech blobs produce zero
-     * candidates at 0.52 while sung fragments with heavy garbling still
-     * clear it; 0.59 measured 40% heavy-garble top-3 recall versus 77% here.
+     * candidates from 0.43 upward, confusable twins never steal the lead,
+     * and lowering from 0.52 to 0.45 lifts heavy-garble top-3 recall from
+     * 72-81% to 86-95% plus two real-singing takes that sat just under the
+     * old bar (sims 0.500 and 0.451).
      */
-    static final double VOICE_ALIGN_THRESHOLD = 0.52;
+    static final double VOICE_ALIGN_THRESHOLD = 0.45;
     /** Align anything shorter than this only wastes CPU; ~3+ short words. */
     static final int VOICE_ALIGN_MIN_CHARS = 14;
     /** Shortlist cap for the alignment stage, ordered by sketch evidence. */
