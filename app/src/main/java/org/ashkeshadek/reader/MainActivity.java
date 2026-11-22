@@ -1606,9 +1606,11 @@ public class MainActivity extends Activity {
     private void openUpdateReleasePage(AppUpdater.UpdateInfo update) {
         try {
             String url = update.releasePageUrl;
-            if (url == null || !url.startsWith(
-                    "https://github.com/aamiqram/Ashke-Sadek---Android-project/releases/")) {
-                url = "https://github.com/aamiqram/Ashke-Sadek---Android-project/releases";
+            if (url == null || !(url.startsWith(
+                    "https://github.com/aamiqram/ashke-sadek-downloads/releases/")
+                    || url.startsWith(
+                    "https://github.com/aamiqram/Ashke-Sadek---Android-project/releases/"))) {
+                url = "https://github.com/aamiqram/ashke-sadek-downloads/releases";
             }
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
         } catch (Exception error) {

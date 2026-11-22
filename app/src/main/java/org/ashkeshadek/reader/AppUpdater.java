@@ -51,15 +51,26 @@ import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 
 final class AppUpdater {
-    private static final String RELEASES_API =
-            "https://api.github.com/repos/aamiqram/Ashke-Sadek---Android-project/releases?per_page=10";
-    private static final String RELEASE_ASSET_PREFIX =
-            "https://github.com/aamiqram/Ashke-Sadek---Android-project/releases/download/";
-    // Raw CDN mirror of the newest update.json (orphan branch pushed by the
+    // Public download repository first (stays public while the source repo is
+    // private); the original source repository stays as a fallback so installs
+    // from before the move keep updating.
+    private static final String[] RELEASES_APIS = {
+            "https://api.github.com/repos/aamiqram/ashke-sadek-downloads/releases?per_page=10",
+            "https://api.github.com/repos/aamiqram/Ashke-Sadek---Android-project/releases?per_page=10"
+    };
+    private static final String[] RELEASE_ASSET_PREFIXES = {
+            "https://github.com/aamiqram/ashke-sadek-downloads/releases/download/",
+            "https://github.com/aamiqram/Ashke-Sadek---Android-project/releases/download/"
+    };
+    // Raw CDN mirrors of the newest update.json (orphan branch pushed by the
     // release workflow). raw.githubusercontent.com has no per-IP API quota, so
     // shared broadband/carrier addresses can never exhaust it.
-    private static final String MIRROR_MANIFEST_URL =
-            "https://raw.githubusercontent.com/aamiqram/Ashke-Sadek---Android-project/update-mirror/update.json";
+    private static final String[] MIRROR_MANIFEST_URLS = {
+            "https://raw.githubusercontent.com/aamiqram/ashke-sadek-downloads/update-mirror/update.json",
+            "https://raw.githubusercontent.com/aamiqram/Ashke-Sadek---Android-project/update-mirror/update.json"
+    };
+    private static final String PUBLIC_RELEASES_PAGE =
+            "https://github.com/aamiqram/ashke-sadek-downloads/releases";
     private static final String PREFS = "ashke_update_state";
     private static final String TAG = "AshkeUpdater";
     /** startActivityForResult code for the Android 5-7 installer confirm. */
@@ -189,26 +200,46 @@ final class AppUpdater {
     /** Newest manifest straight from the raw CDN mirror; null when the app is current. */
     private static UpdateInfo newestFromMirror(long installedVersion, String installedCertificate)
             throws Exception {
-        JSONObject manifest = new JSONObject(readText(MIRROR_MANIFEST_URL, 128 * 1024));
-        long versionCode = manifest.getLong("versionCode");
-        if (versionCode <= installedVersion) return null;
-        String apkUrl = manifest.optString("apkUrl", "");
-        String sha = manifest.optString("sha256", "");
-        String cert = manifest.optString("certificateSha256", "");
-        if (!apkUrl.startsWith(RELEASE_ASSET_PREFIX) || !isSha256(sha) || !isSha256(cert)) {
-            throw new IllegalStateException("মিরর ম্যানিফেস্টে আপডেটের তথ্য অসম্পূর্ণ।");
+        Exception failure = null;
+        for (String mirrorUrl : MIRROR_MANIFEST_URLS) {
+            try {
+                JSONObject manifest = new JSONObject(readText(mirrorUrl, 128 * 1024));
+                long versionCode = manifest.getLong("versionCode");
+                if (versionCode <= installedVersion) return null;
+                String apkUrl = manifest.optString("apkUrl", "");
+                String sha = manifest.optString("sha256", "");
+                String cert = manifest.optString("certificateSha256", "");
+                if (!startsWithReleasePrefix(apkUrl) || !isSha256(sha) || !isSha256(cert)) {
+                    throw new IllegalStateException("মিরর ম্যানিফেস্টে আপডেটের তথ্য অসম্পূর্ণ।");
+                }
+                String versionName = manifest.optString("versionName", "নতুন সংস্করণ");
+                return new UpdateInfo(versionCode, versionName, apkUrl, sha, cert,
+                        manifest.optString("releaseNotes", ""),
+                        releasePageUrl(apkUrl, versionName),
+                        !sameFingerprint(installedCertificate, cert));
+            } catch (Exception error) {
+                failure = error;
+            }
         }
-        String versionName = manifest.optString("versionName", "নতুন সংস্করণ");
-        return new UpdateInfo(versionCode, versionName, apkUrl, sha, cert,
-                manifest.optString("releaseNotes", ""),
-                "https://github.com/aamiqram/Ashke-Sadek---Android-project/releases/tag/v"
-                        + versionName,
-                !sameFingerprint(installedCertificate, cert));
+        throw failure != null ? failure : new IllegalStateException("কোনো মিরর পাওয়া যায়নি।");
     }
 
     private static UpdateInfo newestFromReleasesApi(long installedVersion,
                                                     String installedCertificate) throws Exception {
-        JSONArray releases = new JSONArray(readText(RELEASES_API, 1024 * 1024));
+        Exception failure = null;
+        for (String releasesApi : RELEASES_APIS) {
+            try {
+                return newestFromReleasesApi(releasesApi, installedVersion, installedCertificate);
+            } catch (Exception error) {
+                failure = error;
+            }
+        }
+        throw failure != null ? failure : new IllegalStateException("কোনো আপডেট সার্ভার পাওয়া যায়নি।");
+    }
+
+    private static UpdateInfo newestFromReleasesApi(String releasesApi, long installedVersion,
+                                                    String installedCertificate) throws Exception {
+        JSONArray releases = new JSONArray(readText(releasesApi, 1024 * 1024));
         UpdateInfo newest = null;
 
         for (int i = 0; i < releases.length(); i++) {
@@ -225,7 +256,7 @@ final class AppUpdater {
                     break;
                 }
             }
-            if (manifestUrl == null || !manifestUrl.startsWith(RELEASE_ASSET_PREFIX)) continue;
+            if (manifestUrl == null || !startsWithReleasePrefix(manifestUrl)) continue;
 
             JSONObject manifest = new JSONObject(readText(manifestUrl, 128 * 1024));
             long versionCode = manifest.getLong("versionCode");
@@ -235,7 +266,7 @@ final class AppUpdater {
             String apkUrl = manifest.optString("apkUrl", "");
             String sha = manifest.optString("sha256", "");
             String cert = manifest.optString("certificateSha256", "");
-            if (!apkUrl.startsWith(RELEASE_ASSET_PREFIX) || !isSha256(sha) || !isSha256(cert)) {
+            if (!startsWithReleasePrefix(apkUrl) || !isSha256(sha) || !isSha256(cert)) {
                 continue;
             }
 
@@ -248,6 +279,36 @@ final class AppUpdater {
         }
 
         return newest;
+    }
+
+    private static boolean startsWithReleasePrefix(String url) {
+        if (url == null) return false;
+        for (String prefix : RELEASE_ASSET_PREFIXES) {
+            if (url.startsWith(prefix)) return true;
+        }
+        return false;
+    }
+
+    /** Every address the updater is allowed to read: release assets, both APIs, both mirrors. */
+    private static boolean isAllowedReadUrl(String url) {
+        if (url == null) return false;
+        if (startsWithReleasePrefix(url)) return true;
+        for (String api : RELEASES_APIS) {
+            if (url.equals(api)) return true;
+        }
+        for (String mirror : MIRROR_MANIFEST_URLS) {
+            if (url.equals(mirror)) return true;
+        }
+        return false;
+    }
+
+    /** Release page for a manifest that carries no page URL of its own. */
+    private static String releasePageUrl(String apkUrl, String versionName) {
+        int marker = apkUrl.indexOf("/releases/download/");
+        if (marker > 0) {
+            return apkUrl.substring(0, marker) + "/releases/tag/v" + versionName;
+        }
+        return PUBLIC_RELEASES_PAGE;
     }
 
     /**
@@ -623,7 +684,7 @@ final class AppUpdater {
      * Progress rides a shade notification as a percentage.
      */
     private static void downloadApk(String url, File destination) throws Exception {
-        if (!url.startsWith(RELEASE_ASSET_PREFIX)) {
+        if (!startsWithReleasePrefix(url)) {
             throw new IllegalStateException(
                     "\u0985\u09a8\u09c1\u09ae\u09cb\u09a6\u09bf\u09a4 GitHub release URL \u099b\u09be\u09dc\u09be APK \u09a1\u09be\u0989\u09a8\u09b2\u09cb\u09a1 \u0995\u09b0\u09be \u09af\u09be\u09ac\u09c7 \u09a8\u09be\u0964");
         }
@@ -647,7 +708,15 @@ final class AppUpdater {
 
     /** Same-named copy of the release APK on the raw CDN mirror branch. */
     private static String mirrorApkUrl(String apkUrl) {
-        String afterPrefix = apkUrl.substring(RELEASE_ASSET_PREFIX.length());
+        String prefix = null;
+        for (String candidate : RELEASE_ASSET_PREFIXES) {
+            if (apkUrl.startsWith(candidate)) {
+                prefix = candidate;
+                break;
+            }
+        }
+        if (prefix == null) return null;
+        String afterPrefix = apkUrl.substring(prefix.length());
         int repoEnd = afterPrefix.indexOf('/');
         String file = afterPrefix.substring(afterPrefix.lastIndexOf('/') + 1);
         if (repoEnd <= 0 || file.isEmpty()) return null;
@@ -949,8 +1018,7 @@ final class AppUpdater {
     }
 
     private static String readText(String url, int maxBytes) throws Exception {
-        if (!url.startsWith(RELEASE_ASSET_PREFIX) && !url.equals(RELEASES_API)
-                && !url.equals(MIRROR_MANIFEST_URL)) {
+        if (!isAllowedReadUrl(url)) {
             throw new IllegalStateException("অনুমোদিত আপডেট ঠিকানা নয়।");
         }
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
