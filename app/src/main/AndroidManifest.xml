@@ -17,7 +17,7 @@
         <service android:name=".UpdateCheckJobService"
             android:permission="android.permission.BIND_JOB_SERVICE" android:exported="false" />
         <provider android:name=".UpdateApkProvider"
-            android:authorities="org.ashkeshadek.reader.updateapk"
+            android:authorities="${applicationId}.updateapk"
             android:exported="false" android:grantUriPermissions="true" />
         <service android:name=".VoiceRecognitionService"
             android:process=":voice" android:exported="false" android:stopWithTask="true"

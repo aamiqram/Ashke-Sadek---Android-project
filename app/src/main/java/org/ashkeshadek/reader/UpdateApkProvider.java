@@ -23,7 +23,7 @@ import java.io.FileNotFoundException;
  * does not use it.
  */
 public final class UpdateApkProvider extends ContentProvider {
-    static final String AUTHORITY = "org.ashkeshadek.reader.updateapk";
+    static final String AUTHORITY_SUFFIX = ".updateapk";
     static final String APK_MIME = "application/vnd.android.package-archive";
     /** The one file this provider will ever serve; AppUpdater writes to it. */
     static final String UPDATE_APK_FILE = "ashke-shadek-update.apk";
@@ -31,7 +31,8 @@ public final class UpdateApkProvider extends ContentProvider {
     /** Content URI for the pending update APK inside the app's files/updates directory. */
     static Uri uriFor(Context context, File apk) {
         return new Uri.Builder().scheme(ContentResolver.SCHEME_CONTENT)
-                .authority(AUTHORITY).appendPath(apk.getName()).build();
+                .authority(context.getPackageName() + AUTHORITY_SUFFIX)
+                .appendPath(apk.getName()).build();
     }
 
     static File pendingApkFile(Context context) {
