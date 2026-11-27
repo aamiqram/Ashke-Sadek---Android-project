@@ -971,7 +971,7 @@ public class MainActivity extends Activity {
         tradition.setPadding(dp(16), dp(14), dp(16), dp(16));
         tradition.addView(label("ভাণ্ডারী গানের ধারা", 12, GREEN, true));
         addSpace(tradition, 5);
-        TextView traditionText = label("ভাণ্ডারী গান চট্টগ্রামের মাইজভাণ্ডারী তরিকার আধ্যাত্মিক সাধনার ভাষা। আল্লাহ-রাসূলের প্রেম, মুর্শিদের প্রতি আনুগত্য, অন্তরের আকুলতা ও আত্মসমর্পণ — এই গানগুলোর প্রাণ। দরবার শরীফের মাহফিল ও ওরশে শত শত বছর ধরে মুখে মুখে ফিরে আসা এই গানের সংকলনই এশকে ছাদেক।",
+        TextView traditionText = label("ভাণ্ডারী গান চট্টগ্রামের মাইজভাণ্ডারী তরিকার আধ্যাত্মিক সাধনার ভাষা। আল্লাহ-রাসূলের প্রেম, মুর্শিদের প্রতি আনুগত্য, অন্তরের আকুলতা ও আত্মসমর্পণ — এই গানগুলোর প্রাণ। দরবার শরীফের মাহফিল ও ওরছে শত শত বছর ধরে মুখে মুখে ফিরে আসা এই গানের সংকলনই এশকে ছাদেক।",
                 14, TEXT, false);
         traditionText.setLineSpacing(dp(2), 1f);
         tradition.addView(traditionText, matchWrap());
